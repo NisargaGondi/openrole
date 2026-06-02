@@ -32,5 +32,6 @@ htmlcov/
 # Logs and local data
 *.log
 data/
+!data/.gitkeep
 *.db
 *.sqlite3

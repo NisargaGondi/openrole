@@ -159,7 +159,7 @@ Build in order. Each step should leave something you can run or test, even if th
 
 | # | Milestone | Owner (fill in) | Status |
 |---|-----------|-----------------|--------|
-| 0 | Foundation — `pyproject.toml`, DB schema, `.env.example`, Streamlit shell | | [ ] |
+| 0 | Foundation — `pyproject.toml`, DB schema, `.env.example`, Streamlit shell | ngondi | [x] |
 | 1 | Job ingestion — URL + pasted JD, structured output | | [ ] |
 | 2 | People discovery + priority ranking | | [ ] |
 | 3 | Person research + email / LinkedIn drafts | | [ ] |
@@ -344,16 +344,30 @@ openrole/
 
 ## Setup
 
-Not ready yet. First clone after the repo exists:
+**Requirements:** Python 3.11+, [uv](https://docs.astral.sh/uv/) or pip.
 
 ```bash
 git clone https://github.com/NisargaGondi/openrole.git
 cd openrole
 git checkout ngondi              # or: git checkout sbellad
 
-cp .env.example .env             # fill in locally — never commit
-# install + run: TBD (uv/poetry + streamlit run ...)
+python3 -m venv .venv
+source .venv/bin/activate        # Windows: .venv\Scripts\activate
+
+pip install -e ".[dev]"
+
+cp .env.example .env
+# Edit .env — at minimum set GCP_PROJECT_ID for Gemini (or use ADC)
+
+openrole-migrate                 # creates SQLite DB under data/
+pytest                           # smoke tests
+
+streamlit run src/openrole/ui/app.py
 ```
+
+**Supabase / Postgres:** set `DATABASE_URL=postgresql+psycopg://user:pass@host:5432/openrole` in `.env`, then run `openrole-migrate` again.
+
+**Vertex AI auth:** either set `GOOGLE_APPLICATION_CREDENTIALS` to a service account JSON, or run `gcloud auth application-default login` and set `GCP_PROJECT_ID` in `.env`.
 
 ---
 
