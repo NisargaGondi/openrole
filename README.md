@@ -6,7 +6,7 @@ Most job boards tell you *what* is open. OpenRole is built around *who* is hirin
 
 > **Status:** Early development. The pipeline is designed; implementation is in progress. APIs and data sources are still being evaluated.
 
-**Repo:** Add your GitHub URL here once initialized — `https://github.com/<org>/openrole`
+**Repo:** https://github.com/NisargaGondi/openrole
 
 ---
 
@@ -64,31 +64,73 @@ Graduation target: **May 2027**. Phase B and company targeting are timed around 
 
 ## Collaboration & Git workflow
 
-Two contributors, three long-lived branches:
+Three branches on [GitHub](https://github.com/NisargaGondi/openrole):
 
-| Branch | Purpose |
-|--------|---------|
-| `main` | Stable. Merged, reviewed work only. Runnable (or clearly marked WIP in tags). |
-| `dev/<you>` | Your day-to-day branch (rename when the repo exists) |
-| `dev/<friend>` | Your collaborator’s day-to-day branch |
+| Branch | Owner | Purpose |
+|--------|-------|---------|
+| `main` | shared | Stable. Merged PRs only. |
+| `ngondi` | Nisarga | Day-to-day work → PR into `main` |
+| `sbellad` | collaborator | Day-to-day work → PR into `main` |
 
-**Day to day**
+**Never commit directly to `main`.** Always work on your branch and open a pull request.
 
-1. Pull latest `main` before starting new work.
-2. Do work on your `dev/*` branch.
-3. Open a PR into `main` when a milestone is done (not every tiny commit).
-4. The other person reviews; merge when both agree.
-5. After merge, both dev branches rebase or merge `main` to stay current.
+### Nisarga (`ngondi`)
 
-**Avoid**
+One-time setup (already done if you cloned and checked out `ngondi`):
 
-- Pushing API keys or `.env` (use `.env.example` only).
-- Long-lived divergence — if `main` moves, sync your dev branch at least weekly.
-- Both people editing the same file on the same agent without coordinating (see work split below).
+```bash
+cd openrole
+git fetch origin
+git checkout ngondi
+git branch -u origin/ngondi
+```
 
-**When the repo is live**
+**Start of a work session** (sync with latest `main`):
 
-Update the repo URL at the top of this README and add branch names to the table above. Optional: protect `main` on GitHub (require PR, no direct push).
+```bash
+git checkout ngondi
+git fetch origin
+git merge origin/main    # or: git rebase origin/main
+```
+
+**Save and push your branch:**
+
+```bash
+git add .
+git commit -m "Describe what changed and why"
+git push origin ngondi
+```
+
+**Open a PR into `main`:**
+
+```bash
+gh pr create --base main --head ngondi --title "Short title" --body "## Summary
+- ...
+
+## Test plan
+- [ ] ..."
+```
+
+Or use GitHub: **Compare & pull request** after `git push`.
+
+**After your PR is merged:**
+
+```bash
+git checkout ngondi
+git fetch origin
+git merge origin/main
+git push origin ngondi
+```
+
+### Collaborator (`sbellad`)
+
+Same flow, replacing `ngondi` with `sbellad`.
+
+### Rules
+
+- Pull or merge `origin/main` into your branch before big new work.
+- Use `.env` locally only; commit `.env.example` when we add it.
+- Optional on GitHub: **Settings → Branches →** protect `main` (require PR, no direct push).
 
 ### Suggested work split (adjust as you like)
 
@@ -305,9 +347,9 @@ openrole/
 Not ready yet. First clone after the repo exists:
 
 ```bash
-git clone https://github.com/<org>/openrole.git
+git clone https://github.com/NisargaGondi/openrole.git
 cd openrole
-git checkout dev/<your-branch>   # or create from main
+git checkout ngondi              # or: git checkout sbellad
 
 cp .env.example .env             # fill in locally — never commit
 # install + run: TBD (uv/poetry + streamlit run ...)
