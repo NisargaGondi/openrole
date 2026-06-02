@@ -19,7 +19,11 @@ VERTEX={settings.vertex_configured} ({settings.vertex_model_default})
 
 st.subheader("Integrations")
 rows = [
-    ("Vertex AI (Gemini)", settings.vertex_configured, "GCP_PROJECT_ID"),
+    (
+        "Vertex AI (Gemini)",
+        settings.vertex_configured and settings.gcp_credentials_ready,
+        "GCP_PROJECT_ID + GOOGLE_APPLICATION_CREDENTIALS",
+    ),
     ("Apollo.io", bool(settings.apollo_api_key), "APOLLO_API_KEY"),
     ("OpenAI (fallback)", bool(settings.openai_api_key), "OPENAI_API_KEY"),
     ("Tavily search", bool(settings.tavily_api_key), "TAVILY_API_KEY"),
