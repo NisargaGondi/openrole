@@ -13,6 +13,7 @@ def test_settings_defaults():
 
 def test_init_db_and_stub_graph(monkeypatch):
     monkeypatch.setenv("DATABASE_URL", "sqlite:///:memory:")
+    monkeypatch.setenv("GCP_PROJECT_ID", "")
     import openrole.db.session as db_session
     from openrole.config import get_settings
 
@@ -21,8 +22,9 @@ def test_init_db_and_stub_graph(monkeypatch):
     get_settings.cache_clear()
 
     init_db()
-    result = run_pipeline(job_url="https://example.com/jobs/1")
-    assert "parsed_job" in result
+    result = run_pipeline(job_text="Software Engineer\nCompany: Example Co")
+    assert result.get("parsed_job")
+    assert not result.get("errors")
 
     from openrole.db.models import Company
 

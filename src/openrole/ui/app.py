@@ -39,25 +39,10 @@ st.divider()
 
 st.markdown(
     """
-### Week 1 foundation
+Use the sidebar:
 
-Use the sidebar pages:
-
-- **Jobs** — ingest and review roles (coming in milestone 1)
-- **Outreach** — review email and LinkedIn drafts (milestone 3)
-- **Settings** — environment and integration status
-
-### Quick test (stub pipeline)
-
-Paste a job URL to exercise the placeholder LangGraph (no real scraping yet).
+- **Jobs** — ingest URLs (Greenhouse, Lever, Ashby, LinkedIn, Indeed) and view saved roles
+- **Outreach** — draft review (milestone 3)
+- **Settings** — API keys and integration status
 """
 )
-
-from openrole.graph.main_graph import run_pipeline
-
-job_url = st.text_input("Job URL (optional)")
-job_text = st.text_area("Or paste job description", height=120)
-
-if st.button("Run stub pipeline", type="primary"):
-    result = run_pipeline(job_url=job_url or None, job_text=job_text or None)
-    st.json(result)

@@ -160,7 +160,7 @@ Build in order. Each step should leave something you can run or test, even if th
 | # | Milestone | Owner (fill in) | Status |
 |---|-----------|-----------------|--------|
 | 0 | Foundation — `pyproject.toml`, DB schema, `.env.example`, Streamlit shell | ngondi | [x] |
-| 1 | Job ingestion — URL + pasted JD, structured output | | [ ] |
+| 1 | Job ingestion — URL + pasted JD, structured output | ngondi | [x] |
 | 2 | People discovery + priority ranking | | [ ] |
 | 3 | Person research + email / LinkedIn drafts | | [ ] |
 | 4 | Resume ATS pass + application question drafts | | [ ] |
@@ -362,8 +362,19 @@ cp .env.example .env
 openrole-migrate                 # creates SQLite DB under data/
 pytest                           # smoke tests
 
+# LinkedIn/Indeed search (optional; needs Python 3.10+ wheels)
+pip install "python-jobspy>=1.1.82"
+
 streamlit run src/openrole/ui/app.py
 ```
+
+**Ingest examples**
+
+- Greenhouse: `https://boards.greenhouse.io/{company}/jobs/{id}`
+- Lever: `https://jobs.lever.co/{company}/{posting_id}`
+- Ashby: `https://jobs.ashbyhq.com/{org}/{job_id}`
+- LinkedIn / Indeed: paste the job description if search match is weak
+- Workday / Handshake: paste description (scraper/MCP later)
 
 **Supabase / Postgres:** set `DATABASE_URL=postgresql+psycopg://user:pass@host:5432/openrole` in `.env`, then run `openrole-migrate` again.
 
