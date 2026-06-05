@@ -19,10 +19,20 @@ dependencies = [
     "langchain-core>=0.3",
     "langchain-google-vertexai>=2.0",
     "streamlit>=1.32",
-    "python-jobspy>=1.1.80",
 ]
 
 [project.optional-dependencies]
+jobspy = [
+    "python-jobspy>=1.1.82",
+    "numpy>=1.26",
+    "pandas>=2.1",
+    "tls-client>=1.0",
+    "markdownify>=1.1",
+]
+handshake = [
+    "handshake-mcp-server>=0.1.0",
+    "mcp>=1.0",
+]
 dev = [
     "pytest>=8.0",
     "ruff>=0.4",

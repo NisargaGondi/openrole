@@ -33,7 +33,8 @@ class Settings(BaseSettings):
     gcp_project_id: str | None = Field(default=None, alias="GCP_PROJECT_ID")
     gcp_location: str = Field(default="us-central1", alias="GCP_LOCATION")
     vertex_model_default: str = Field(default="gemini-2.0-flash", alias="VERTEX_MODEL_DEFAULT")
-    vertex_model_writing: str = Field(default="gemini-2.0-flash", alias="VERTEX_MODEL_WRITING")
+    vertex_model_ingestion: str = Field(default="gemini-2.0-flash", alias="VERTEX_MODEL_INGESTION")
+    vertex_model_writing: str = Field(default="gemini-2.5-pro", alias="VERTEX_MODEL_WRITING")
 
     @field_validator("google_application_credentials", mode="before")
     @classmethod

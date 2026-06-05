@@ -6,13 +6,23 @@ from langchain_google_vertexai import ChatVertexAI
 from openrole.config import get_settings
 
 
-def get_chat_model(*, writing: bool = False, temperature: float = 0.2) -> BaseChatModel:
+def get_chat_model(
+    *,
+    writing: bool = False,
+    ingestion: bool = False,
+    temperature: float = 0.2,
+) -> BaseChatModel:
     settings = get_settings()
     if not settings.gcp_project_id:
         raise RuntimeError(
             "GCP_PROJECT_ID is not set. Add it to .env or export it before using Gemini."
         )
-    model_name = settings.vertex_model_writing if writing else settings.vertex_model_default
+    if ingestion:
+        model_name = settings.vertex_model_ingestion
+    elif writing:
+        model_name = settings.vertex_model_writing
+    else:
+        model_name = settings.vertex_model_default
     return ChatVertexAI(
         model_name=model_name,
         project=settings.gcp_project_id,

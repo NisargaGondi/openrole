@@ -15,9 +15,14 @@ tab_ingest, tab_list = st.tabs(["Ingest", "Saved jobs"])
 
 with tab_ingest:
     st.subheader("Add a job")
+    if not jobspy_client.is_available():
+        st.warning(
+            "JobSpy is not installed — LinkedIn/Indeed URLs need pasted text, or run "
+            "`bash scripts/install_jobspy.sh`."
+        )
     job_url = st.text_input("Job URL", placeholder="Greenhouse, Lever, Ashby, LinkedIn, Indeed…")
     job_text = st.text_area(
-        "Pasted description (optional; required for Workday / Handshake / fallback)",
+        "Pasted description (fallback for LinkedIn; optional for Workday errors)",
         height=160,
     )
     col1, col2 = st.columns(2)

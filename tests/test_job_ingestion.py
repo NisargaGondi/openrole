@@ -81,5 +81,5 @@ def test_greenhouse_ingest(mock_get_json, monkeypatch):
 
 
 def test_workday_requires_text():
-    with pytest.raises(JobIngestionError, match="Workday"):
-        ingest_job(job_url="https://acme.wd5.myworkdayjobs.com/en-US/careers/job/123")
+    with pytest.raises(JobIngestionError):
+        ingest_job(job_url="https://acme.wd5.myworkdayjobs.com/en-US/careers/jobs")

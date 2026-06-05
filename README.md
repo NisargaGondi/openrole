@@ -360,10 +360,9 @@ cp .env.example .env
 # Edit .env — at minimum set GCP_PROJECT_ID for Gemini (or use ADC)
 
 openrole-migrate                 # creates SQLite DB under data/
+bash scripts/install_jobspy.sh   # LinkedIn/Indeed (required if path has apostrophe)
+pip install -e ".[handshake]"    # optional: Handshake MCP (local login)
 pytest                           # smoke tests
-
-# LinkedIn/Indeed search (optional; needs Python 3.10+ wheels)
-pip install "python-jobspy>=1.1.82"
 
 streamlit run src/openrole/ui/app.py
 ```
@@ -373,8 +372,9 @@ streamlit run src/openrole/ui/app.py
 - Greenhouse: `https://boards.greenhouse.io/{company}/jobs/{id}`
 - Lever: `https://jobs.lever.co/{company}/{posting_id}`
 - Ashby: `https://jobs.ashbyhq.com/{org}/{job_id}`
-- LinkedIn / Indeed: paste the job description if search match is weak
-- Workday / Handshake: paste description (scraper/MCP later)
+- LinkedIn / Indeed: JobSpy (`bash scripts/install_jobspy.sh`)
+- **Workday**: full `/job/...` URL (public CXS API)
+- **Handshake**: `/jobs/{id}` via local MCP after `python -m handshake_mcp_server --login`
 
 **Supabase / Postgres:** set `DATABASE_URL=postgresql+psycopg://user:pass@host:5432/openrole` in `.env`, then run `openrole-migrate` again.
 

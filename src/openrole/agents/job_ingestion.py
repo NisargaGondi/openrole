@@ -13,8 +13,14 @@ from openrole.db.repository import save_parsed_job
 from openrole.llm.vertex import get_chat_model
 from openrole.schemas.job import ParsedJob
 from openrole.scrapers.ats_apis import fetch_from_ats
+from openrole.scrapers.handshake_client import (
+    HandshakeMCPError,
+    HandshakeNotConfiguredError,
+    fetch_from_handshake,
+)
 from openrole.scrapers.page_meta import fetch_page_title, parse_linkedin_title
-from openrole.scrapers.url_detect import JobPlatform, JobUrlInfo, detect_job_url
+from openrole.scrapers.url_detect import JobPlatform, detect_job_url
+from openrole.scrapers.workday import WorkdayParseError, fetch_from_workday
 from openrole.tools import jobspy_client
 
 
@@ -52,6 +58,14 @@ def _ingest_from_url(url: str, fallback_text: str | None) -> tuple[ParsedJob, li
         return fetch_from_ats(info), warnings
 
     if info.platform == JobPlatform.LINKEDIN:
+        if not jobspy_client.is_available():
+            if fallback_text:
+                return _extract_with_llm(fallback_text, source_url=url), [
+                    jobspy_client.jobspy_install_hint(),
+                    "Used pasted text because JobSpy is missing.",
+                ]
+            raise JobIngestionError(jobspy_client.jobspy_install_hint())
+
         title, company = None, None
         page_title = fetch_page_title(url)
         if page_title:
@@ -67,10 +81,13 @@ def _ingest_from_url(url: str, fallback_text: str | None) -> tuple[ParsedJob, li
                 linkedin_job_id=info.job_id,
                 source_url=url,
             )
+            parsed.source_url = url
             warnings.append(
                 "LinkedIn matched via JobSpy search; verify title/company if results look wrong."
             )
             return parsed, warnings
+        except ImportError as exc:
+            raise JobIngestionError(str(exc)) from exc
         except Exception as exc:
             if fallback_text:
                 return _extract_with_llm(fallback_text, source_url=url), [
@@ -81,14 +98,19 @@ def _ingest_from_url(url: str, fallback_text: str | None) -> tuple[ParsedJob, li
             ) from exc
 
     if info.platform == JobPlatform.INDEED:
+        if not jobspy_client.is_available():
+            if fallback_text:
+                return _extract_with_llm(fallback_text, source_url=url), [
+                    "JobSpy not installed; used pasted text.",
+                ]
+            raise JobIngestionError(jobspy_client.jobspy_install_hint())
         try:
-            return (
-                jobspy_client.fetch_indeed_by_search(
-                    indeed_job_id=info.job_id,
-                    source_url=url,
-                ),
-                ["Indeed matched via JobSpy search; verify the listing."],
+            parsed = jobspy_client.fetch_indeed_by_search(
+                indeed_job_id=info.job_id,
+                source_url=url,
             )
+            parsed.source_url = url
+            return parsed, ["Indeed matched via JobSpy search; verify the listing."]
         except Exception as exc:
             if fallback_text:
                 return _extract_with_llm(fallback_text, source_url=url), [
@@ -97,21 +119,32 @@ def _ingest_from_url(url: str, fallback_text: str | None) -> tuple[ParsedJob, li
             raise JobIngestionError("Indeed ingestion failed. Paste the job description.") from exc
 
     if info.platform == JobPlatform.WORKDAY:
-        if fallback_text:
-            parsed = _extract_with_llm(fallback_text, source_url=url)
-            return parsed, ["Workday scraper not implemented; parsed from pasted text."]
-        raise JobIngestionError(
-            "Workday URLs need a pasted job description for now (Playwright scraper coming later)."
-        )
+        try:
+            return fetch_from_workday(info), ["Workday fetched via public CXS API."]
+        except WorkdayParseError as exc:
+            if fallback_text:
+                return _extract_with_llm(fallback_text, source_url=url), [
+                    f"Workday API failed ({exc}); used pasted text.",
+                ]
+            raise JobIngestionError(str(exc)) from exc
 
     if info.platform == JobPlatform.HANDSHAKE:
-        if fallback_text:
-            parsed = _extract_with_llm(fallback_text, source_url=url)
-            parsed.source_platform = JobPlatform.HANDSHAKE.value
-            return parsed, ["Handshake API/MCP not wired in graph yet; parsed from pasted text."]
-        raise JobIngestionError(
-            "Handshake job URL requires pasted description until MCP integration is added."
-        )
+        try:
+            return fetch_from_handshake(info), [
+                "Handshake fetched via local MCP (stdio). Session stays on your machine."
+            ]
+        except HandshakeNotConfiguredError as exc:
+            if fallback_text:
+                parsed = _extract_with_llm(fallback_text, source_url=url)
+                parsed.source_platform = JobPlatform.HANDSHAKE.value
+                return parsed, [str(exc), "Used pasted text as fallback."]
+            raise JobIngestionError(str(exc)) from exc
+        except HandshakeMCPError as exc:
+            if fallback_text:
+                parsed = _extract_with_llm(fallback_text, source_url=url)
+                parsed.source_platform = JobPlatform.HANDSHAKE.value
+                return parsed, [str(exc), "Used pasted text as fallback."]
+            raise JobIngestionError(str(exc)) from exc
 
     if fallback_text:
         return _extract_with_llm(fallback_text, source_url=url), [
@@ -132,7 +165,7 @@ def _ingest_from_text(text: str) -> ParsedJob:
 
 
 def _extract_with_llm(text: str, source_url: str | None = None) -> ParsedJob:
-    model = get_chat_model()
+    model = get_chat_model(ingestion=True)
     system = (
         "Extract job posting fields from the user content. "
         "Return ONLY valid JSON with keys: "
