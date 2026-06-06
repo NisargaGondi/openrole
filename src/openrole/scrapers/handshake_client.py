@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import sys
 from pathlib import Path
 from typing import Any
@@ -19,6 +20,12 @@ from openrole.schemas.job import ParsedJob
 from openrole.scrapers.url_detect import JobUrlInfo
 
 PROFILE_DIR = Path.home() / ".handshake-mcp" / "profile"
+
+_PATCHRIGHT_BROWSER_HINT = (
+    "Patchright Chromium is missing. Run once:\n"
+    "  bash scripts/install_handshake.sh\n"
+    "or: python -m patchright install chromium"
+)
 
 
 class HandshakeNotConfiguredError(RuntimeError):
@@ -42,22 +49,80 @@ def handshake_mcp_installed() -> bool:
         return False
 
 
+def patchright_browser_ready() -> bool:
+    """True when Patchright's Chromium binary is present (required for --login)."""
+    cache_dirs = (
+        Path.home() / "Library" / "Caches" / "ms-playwright",
+        Path.home() / ".cache" / "ms-playwright",
+    )
+    chrome_names = (
+        Path("chrome-mac-arm64")
+        / "Google Chrome for Testing.app"
+        / "Contents"
+        / "MacOS"
+        / "Google Chrome for Testing",
+        Path("chrome-linux") / "chrome",
+        Path("chrome-win") / "chrome.exe",
+    )
+    for cache in cache_dirs:
+        if not cache.is_dir():
+            continue
+        for d in cache.glob("chromium-*"):
+            if d.name.startswith("chromium_headless"):
+                continue
+            for rel in chrome_names:
+                if (d / rel).is_file():
+                    return True
+    return False
+
+
+def handshake_ready() -> bool:
+    return (
+        handshake_mcp_installed()
+        and patchright_browser_ready()
+        and handshake_profile_ready()
+    )
+
+
+def _handshake_mcp_argv() -> list[str]:
+    """CLI args for the local Handshake MCP subprocess."""
+    argv = ["-m", "handshake_mcp_server", "--transport", "stdio"]
+    # Cloudflare blocks Patchright in headless mode on macOS; login uses headed browser too.
+    headless_env = os.environ.get("OPENROLE_HANDSHAKE_HEADLESS")
+    if headless_env is not None:
+        if headless_env.lower() not in ("1", "true", "yes"):
+            argv.append("--no-headless")
+    elif sys.platform == "darwin":
+        argv.append("--no-headless")
+    return argv
+
+
 def fetch_from_handshake(info: JobUrlInfo) -> ParsedJob:
     if not handshake_mcp_installed():
         raise HandshakeNotConfiguredError(
             "Install Handshake support: pip install 'openrole[handshake]'"
         )
+    if not patchright_browser_ready():
+        raise HandshakeNotConfiguredError(_PATCHRIGHT_BROWSER_HINT)
     if not info.job_id:
         raise HandshakeMCPError("Could not parse Handshake job ID from URL")
     if not handshake_profile_ready():
         raise HandshakeNotConfiguredError(
             "No Handshake login profile found. Run once:\n"
-            "  python -m handshake_mcp_server --login --no-headless\n"
-            "Session stays in ~/.handshake-mcp/profile on your machine only."
+            "  python scripts/handshake_login.py --clear-profile --force\n"
+            "Session stays in ~/.handshake-mcp/profile on your machine only.\n"
+            "If login fails with 'Executable doesn't exist', run:\n"
+            "  bash scripts/install_handshake.sh"
         )
 
     payload = _call_tool_sync("get_job_details", {"job_id": info.job_id})
-    return _payload_to_parsed_job(payload, source_url=info.url, job_id=info.job_id)
+    parsed = _payload_to_parsed_job(payload, source_url=info.url, job_id=info.job_id)
+    if _looks_like_login_page(parsed):
+        raise HandshakeMCPError(
+            "Handshake session expired or job page redirected to login. "
+            "Re-login: python scripts/handshake_login.py"
+        )
+    return parsed
 
 
 def search_handshake_events(*, keywords: str = "", max_pages: int = 1) -> dict[str, Any]:
@@ -79,7 +144,7 @@ async def _call_tool_async(tool_name: str, arguments: dict[str, Any]) -> dict[st
     # stdio only — never HTTP / remote MCP (keeps cookies on localhost).
     server_params = StdioServerParameters(
         command=sys.executable,
-        args=["-m", "handshake_mcp_server"],
+        args=_handshake_mcp_argv(),
         env=None,
     )
 
@@ -89,9 +154,30 @@ async def _call_tool_async(tool_name: str, arguments: dict[str, Any]) -> dict[st
             result = await session.call_tool(tool_name, arguments)
 
     if result.isError:
-        raise HandshakeMCPError(f"Handshake tool {tool_name} failed: {result.content}")
+        raise HandshakeMCPError(
+            f"Handshake tool {tool_name} failed: {_format_mcp_error(result.content)}"
+        )
 
     return _content_to_dict(result.content)
+
+
+def _format_mcp_error(content: Any) -> str:
+    if not content:
+        return "Unknown MCP error"
+    parts: list[str] = []
+    for block in content:
+        text = getattr(block, "text", None) or str(block)
+        if text:
+            parts.append(text)
+    msg = " ".join(parts)
+    if "Cloudflare" in msg:
+        msg += (
+            "\n\nHandshake blocked headless scraping. OpenRole launches a visible browser on macOS; "
+            "retry in a few seconds or re-login: python scripts/handshake_login.py"
+        )
+    elif "Not authenticated" in msg or "session expired" in msg.lower():
+        msg += "\n\nRe-login: python scripts/handshake_login.py"
+    return msg
 
 
 def _content_to_dict(content: Any) -> dict[str, Any]:
@@ -104,6 +190,16 @@ def _content_to_dict(content: Any) -> dict[str, Any]:
     except json.JSONDecodeError:
         return {"raw": text}
     return data if isinstance(data, dict) else {"raw": data}
+
+
+def _looks_like_login_page(parsed: ParsedJob) -> bool:
+    title = (parsed.title or "").lower()
+    company = (parsed.company_name or "").lower()
+    if "log in" in title or "sign up" in title:
+        return True
+    if company in ("unknown company", "") and not parsed.description:
+        return True
+    return False
 
 
 def _payload_to_parsed_job(payload: dict[str, Any], *, source_url: str, job_id: str) -> ParsedJob:

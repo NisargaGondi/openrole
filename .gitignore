@@ -31,9 +31,12 @@ htmlcov/
 # Handshake MCP / browser profiles (local session)
 .handshake-mcp/
 
+# CareerShift browser profile (local session)
+.openrole/
+
 # Logs and local data
 *.log
-data/
+data/*
 !data/.gitkeep
 *.db
 *.sqlite3

@@ -22,6 +22,7 @@ from openrole.scrapers.page_meta import fetch_page_title, parse_linkedin_title
 from openrole.scrapers.url_detect import JobPlatform, detect_job_url
 from openrole.scrapers.workday import WorkdayParseError, fetch_from_workday
 from openrole.tools import jobspy_client
+from openrole.tools.domain_resolver import enrich_parsed_job_domain
 
 
 class JobIngestionError(Exception):
@@ -39,6 +40,10 @@ def ingest_job(*, job_url: str | None = None, job_text: str | None = None) -> di
         parsed, warnings = _ingest_from_url(job_url.strip(), job_text)
     else:
         parsed = _ingest_from_text(job_text or "")
+        warnings = []
+
+    parsed, domain_warnings = enrich_parsed_job_domain(parsed)
+    warnings.extend(domain_warnings)
 
     job, company = save_parsed_job(parsed)
     return {
@@ -93,8 +98,24 @@ def _ingest_from_url(url: str, fallback_text: str | None) -> tuple[ParsedJob, li
                 return _extract_with_llm(fallback_text, source_url=url), [
                     f"JobSpy failed ({exc}); used pasted text instead."
                 ]
+            # Indeed is more reliable when LinkedIn rate-limits
+            if jobspy_client.is_available() and title:
+                try:
+                    parsed = jobspy_client.fetch_indeed_by_search(
+                        company=company,
+                        title=title,
+                        source_url=url,
+                    )
+                    parsed.source_url = url
+                    parsed.source_platform = JobPlatform.LINKEDIN.value
+                    return parsed, [
+                        "LinkedIn blocked/rate-limited; matched via Indeed JobSpy search instead.",
+                    ]
+                except Exception:
+                    pass
             raise JobIngestionError(
-                "LinkedIn ingestion failed. Paste the full job description below and retry."
+                "LinkedIn ingestion failed (JobSpy search can rate-limit). "
+                "Paste the full job description below and retry."
             ) from exc
 
     if info.platform == JobPlatform.INDEED:

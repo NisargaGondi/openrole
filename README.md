@@ -4,14 +4,79 @@ Job search tooling that does the boring research so you can write the emails tha
 
 Most job boards tell you *what* is open. OpenRole is built around *who* is hiring, *which team* owns the role, and *how* to reach them without sounding like you mailed five hundred people from the same template.
 
-> **Status:** Early development. The pipeline is designed; implementation is in progress. APIs and data sources are still being evaluated.
+> **Status:** Phase A (M0–M5) is implemented and runnable locally — job ingestion through LangGraph pipeline with human review gates. Phase B (scout + sync) is next.
 
 **Repo:** https://github.com/NisargaGondi/openrole
 
 ---
 
+## Quick start (5 minutes)
+
+**Requirements:** Python 3.11+, git, a [Google Cloud project](https://console.cloud.google.com/) with Vertex AI enabled (Gemini).
+
+```bash
+git clone https://github.com/NisargaGondi/openrole.git
+cd openrole
+git checkout ngondi          # active dev branch; use main after PR merge
+
+python3 -m venv .venv
+source .venv/bin/activate    # Windows: .venv\Scripts\activate
+
+pip install -e ".[dev]"
+cp .env.example .env         # then edit .env locally — never commit .env
+
+# Vertex AI: pick ONE auth method in .env
+#   A) GCP_PROJECT_ID=your-project  +  gcloud auth application-default login
+#   B) GCP_PROJECT_ID=your-project  +  GOOGLE_APPLICATION_CREDENTIALS=/path/to/sa.json
+
+openrole-migrate
+pytest                       # 57 tests — should all pass
+bash scripts/run_streamlit.sh
+```
+
+Open **http://localhost:8501**. Use the sidebar:
+
+| Tab | What to do |
+|-----|------------|
+| **Jobs** | Paste a Greenhouse/Lever/Ashby URL or job description → **Ingest & save** |
+| **Jobs → Saved jobs** | Set company domain if missing → **Find people** or **Find people + draft outreach** |
+| **Outreach** | Review email / LinkedIn drafts (nothing sends automatically) |
+| **Apply** | Run resume vs JD analysis; paste application questions for draft answers |
+| **Pipeline** | Run the full LangGraph workflow with review gates |
+| **Settings** | See which API keys and profile fields are configured |
+
+**Optional but useful**
+
+```bash
+bash scripts/install_jobspy.sh      # LinkedIn / Indeed ingestion
+bash scripts/install_careershift.sh # CMU CareerShift (browser login)
+python scripts/careershift_login.py # one-time CareerShift session
+bash scripts/install_handshake.sh   # Handshake MCP
+python scripts/handshake_login.py   # one-time Handshake session
+python scripts/check_env.py         # validate .env without printing secrets
+```
+
+**Minimum `.env` for a useful demo:** `GCP_PROJECT_ID`, `CANDIDATE_NAME`, `CANDIDATE_RESUME_PATHS` (path to a `.pdf`/`.md` resume). Add `APOLLO_API_KEY` for people discovery.
+
+---
+
+## Security — do not commit secrets
+
+These files are **gitignored** and must stay local:
+
+- `.env` — all API keys and paths
+- `gen-lang-client-*.json` / service account JSON files
+- `data/` — SQLite DB and LangGraph checkpoint state
+- `.openrole/` / `.handshake-mcp/` — browser login sessions (CareerShift, Handshake)
+
+Only commit `.env.example` with placeholder values. If you accidentally commit a key, rotate it immediately.
+
+---
+
 ## Table of contents
 
+- [Quick start (5 minutes)](#quick-start-5-minutes)
+- [Security — do not commit secrets](#security--do-not-commit-secrets)
 - [What it does](#what-it-does)
 - [What it does not do](#what-it-does-not-do)
 - [Collaboration & Git workflow](#collaboration--git-workflow)
@@ -161,10 +226,10 @@ Build in order. Each step should leave something you can run or test, even if th
 |---|-----------|-----------------|--------|
 | 0 | Foundation — `pyproject.toml`, DB schema, `.env.example`, Streamlit shell | ngondi | [x] |
 | 1 | Job ingestion — URL + pasted JD, structured output | ngondi | [x] |
-| 2 | People discovery + priority ranking | | [ ] |
-| 3 | Person research + email / LinkedIn drafts | | [ ] |
-| 4 | Resume ATS pass + application question drafts | | [ ] |
-| 5 | LangGraph orchestration + human review gate in UI | | [ ] |
+| 2 | People discovery + priority ranking | ngondi | [x] |
+| 3 | Person research + email / LinkedIn drafts | ngondi | [x] |
+| 4 | Resume ATS pass + application question drafts | ngondi | [x] |
+| 5 | LangGraph orchestration + human review gate in UI | ngondi | [x] |
 | 6 | Phase B — scheduled scout, dedup, Notion/Sheets sync | | [ ] |
 | 7 | Polish — dashboard, notifications, docs | | [ ] |
 | — | Company list seed (200–250 targets) — **not automated**; research doc → feeds scout | | [ ] |
@@ -295,86 +360,96 @@ Not an agent deliverable. A shared doc with ~200–250 companies (Ambitious / Mo
 
 ---
 
-## Project layout (planned)
+## Project layout
 
 ```
 openrole/
 ├── pyproject.toml
-├── .env.example
-├── src/
-│   ├── agents/
-│   │   ├── job_ingestion.py
-│   │   ├── company_intel.py
-│   │   ├── people_discovery.py
-│   │   ├── person_research.py
-│   │   ├── email_writer.py
-│   │   ├── resume_optimizer.py
-│   │   ├── app_assistant.py
-│   │   └── job_scout.py
-│   ├── graph/
-│   │   ├── main_graph.py
-│   │   ├── state.py
-│   │   ├── nodes.py
-│   │   └── edges.py
-│   ├── scrapers/
-│   │   ├── workday.py
-│   │   ├── careershift.py
-│   │   └── ats_apis.py
-│   ├── tools/
-│   │   ├── apollo_client.py
-│   │   ├── jobspy_client.py
-│   │   ├── email_finder.py
-│   │   └── web_search.py
-│   ├── db/
-│   │   ├── models.py
-│   │   ├── sync_notion.py
-│   │   └── sync_sheets.py
-│   ├── ui/
-│   │   ├── app.py
-│   │   └── pages/
-│   ├── config.py
-│   └── scheduler.py
+├── .env.example              # template only — copy to .env
 ├── scripts/
-│   ├── seed_companies.py
-│   └── migrate_db.py
-└── README.md
+│   ├── run_streamlit.sh
+│   ├── install_jobspy.sh
+│   ├── install_careershift.sh / careershift_login.py
+│   ├── install_handshake.sh / handshake_login.py
+│   └── check_env.py
+├── src/openrole/
+│   ├── agents/               # job_ingestion, people_discovery, person_research,
+│   │                           # email_writer, draft_evaluator, resume_optimizer, app_assistant
+│   ├── graph/                # LangGraph pipeline (main_graph, nodes, routing, checkpoint)
+│   ├── scrapers/             # ATS APIs, Workday, CareerShift, Handshake
+│   ├── tools/                # apollo_client, jobspy, domain_resolver, candidate_profile
+│   ├── db/                   # SQLAlchemy models, repository, migrate
+│   ├── ui/pages/             # Jobs, Outreach, Apply, Pipeline, Settings
+│   └── config.py
+├── tests/                    # 57 pytest tests
+└── data/                     # gitignored except .gitkeep — local SQLite lives here
 ```
 
 ---
 
-## Setup
+## Setup (detailed)
 
-**Requirements:** Python 3.11+, [uv](https://docs.astral.sh/uv/) or pip.
+**Requirements:** Python 3.11+, pip or [uv](https://docs.astral.sh/uv/).
+
+### 1. Clone and branch
 
 ```bash
 git clone https://github.com/NisargaGondi/openrole.git
 cd openrole
 git checkout ngondi              # or: git checkout sbellad
-
-python3 -m venv .venv
-source .venv/bin/activate        # Windows: .venv\Scripts\activate
-
-pip install -e ".[dev]"
-
-cp .env.example .env
-# Edit .env — at minimum set GCP_PROJECT_ID for Gemini (or use ADC)
-
-openrole-migrate                 # creates SQLite DB under data/
-bash scripts/install_jobspy.sh   # LinkedIn/Indeed (required if path has apostrophe)
-pip install -e ".[handshake]"    # optional: Handshake MCP (local login)
-pytest                           # smoke tests
-
-streamlit run src/openrole/ui/app.py
 ```
 
-**Ingest examples**
+### 2. Python environment
+
+```bash
+python3 -m venv .venv
+source .venv/bin/activate        # Windows: .venv\Scripts\activate
+pip install -e ".[dev]"
+```
+
+If your clone path contains an apostrophe (e.g. `Summer'26`), use `bash scripts/install_jobspy.sh` instead of `pip install jobspy`.
+
+### 3. Configure environment
+
+```bash
+cp .env.example .env
+```
+
+Edit `.env` locally. See [`.env.example`](.env.example) for all keys.
+
+| Variable | Required for | Notes |
+|----------|--------------|-------|
+| `GCP_PROJECT_ID` | LLM (ingestion, drafts, resume) | Vertex AI Gemini |
+| `GOOGLE_APPLICATION_CREDENTIALS` | LLM (alt) | Or use `gcloud auth application-default login` |
+| `APOLLO_API_KEY` | People discovery | Apollo.io people search |
+| `TAVILY_API_KEY` | Deeper research | Optional; LLM-only brief without it |
+| `CANDIDATE_*` | Outreach / Apply drafts | Name, resume paths, LinkedIn, GitHub |
+| `DATABASE_URL` | Database | Default SQLite under `data/` |
+
+Run `python scripts/check_env.py` to verify configuration (does not print secret values).
+
+### 4. Initialize database and tests
+
+```bash
+openrole-migrate
+pytest
+```
+
+### 5. Start the UI
+
+```bash
+bash scripts/run_streamlit.sh
+# equivalent: streamlit run src/openrole/ui/app.py
+```
+
+### Ingest URL examples
 
 - Greenhouse: `https://boards.greenhouse.io/{company}/jobs/{id}`
 - Lever: `https://jobs.lever.co/{company}/{posting_id}`
 - Ashby: `https://jobs.ashbyhq.com/{org}/{job_id}`
 - LinkedIn / Indeed: JobSpy (`bash scripts/install_jobspy.sh`)
 - **Workday**: full `/job/...` URL (public CXS API)
-- **Handshake**: `/jobs/{id}` via local MCP after `python -m handshake_mcp_server --login`
+- **Handshake**: `/jobs/{id}` via local MCP after `bash scripts/install_handshake.sh` and `python scripts/handshake_login.py`
 
 **Supabase / Postgres:** set `DATABASE_URL=postgresql+psycopg://user:pass@host:5432/openrole` in `.env`, then run `openrole-migrate` again.
 

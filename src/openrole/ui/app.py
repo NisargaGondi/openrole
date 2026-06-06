@@ -42,7 +42,9 @@ st.markdown(
 Use the sidebar:
 
 - **Jobs** — ingest URLs (Greenhouse, Lever, Ashby, LinkedIn, Indeed) and view saved roles
-- **Outreach** — draft review (milestone 3)
-- **Settings** — API keys and integration status
+- **Outreach** — review email and LinkedIn drafts
+- **Apply** — resume fit / ATS analysis and application question drafts
+- **Pipeline** — run the full LangGraph workflow with review gates
+- **Settings** — API keys, candidate profile, and integration status
 """
 )

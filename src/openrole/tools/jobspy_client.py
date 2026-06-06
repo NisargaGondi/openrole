@@ -11,13 +11,20 @@ from openrole.scrapers.url_detect import JobPlatform
 
 
 def is_available() -> bool:
-    return importlib.util.find_spec("jobspy") is not None
+    if importlib.util.find_spec("jobspy") is None:
+        return False
+    try:
+        from jobspy import scrape_jobs  # noqa: F401
+    except ImportError:
+        return False
+    return callable(scrape_jobs)
 
 
 def jobspy_install_hint() -> str:
     return (
-        "JobSpy is not installed. From the repo root run:\n"
+        "JobSpy (python-jobspy) is not installed correctly. From the repo root run:\n"
         "  bash scripts/install_jobspy.sh\n"
+        "Do NOT run `pip install jobspy` — that installs a different unrelated package.\n"
         "If pip fails (path with apostrophe), use a clone path without `'` in the folder name."
     )
 
@@ -37,17 +44,20 @@ def fetch_linkedin_by_search(
     from jobspy import scrape_jobs
 
     search_term = " ".join(p for p in [title, company] if p) or "software engineer"
-    df = scrape_jobs(
-        site_name=["linkedin"],
-        search_term=search_term,
-        location=location or "United States",
-        results_wanted=40,
-        linkedin_fetch_description=True,
-    )
+    try:
+        df = scrape_jobs(
+            site_name=["linkedin"],
+            search_term=search_term,
+            location=location or "United States",
+            results_wanted=15,
+            linkedin_fetch_description=True,
+        )
+    except Exception as exc:
+        raise ValueError(_format_jobspy_error(exc, site="LinkedIn")) from exc
     if df is None or df.empty:
         raise ValueError(
             f"No LinkedIn jobs returned for search '{search_term}'. "
-            "LinkedIn may be rate-limiting — paste the job description as fallback."
+            + _rate_limit_hint("LinkedIn")
         )
 
     row = _match_row(
@@ -80,13 +90,16 @@ def fetch_indeed_by_search(
     from jobspy import scrape_jobs
 
     search_term = " ".join(p for p in [title, company] if p) or "software engineer"
-    df = scrape_jobs(
-        site_name=["indeed"],
-        search_term=search_term,
-        location=location or "United States",
-        results_wanted=40,
-        country_indeed="USA",
-    )
+    try:
+        df = scrape_jobs(
+            site_name=["indeed"],
+            search_term=search_term,
+            location=location or "United States",
+            results_wanted=15,
+            country_indeed="USA",
+        )
+    except Exception as exc:
+        raise ValueError(_format_jobspy_error(exc, site="Indeed")) from exc
     if df is None or df.empty:
         raise ValueError("No Indeed jobs returned from JobSpy for this search")
 
@@ -204,3 +217,21 @@ def _domain_from_company(company: str) -> str | None:
 def _extract_id_from_url(url: str) -> str | None:
     match = re.search(r"/jobs/view/(\d+)", url)
     return match.group(1) if match else None
+
+
+def _format_jobspy_error(exc: Exception, *, site: str) -> str:
+    msg = str(exc).lower()
+    if "rate" in msg or "limit" in msg or "429" in msg or "blocked" in msg:
+        return (
+            f"{site} rate-limited JobSpy (python-jobspy). "
+            "Paste the job description, use Greenhouse/Lever/Ashby/Workday, or retry later. "
+            "JobSpy is not deprecated — ensure you installed via bash scripts/install_jobspy.sh."
+        )
+    return f"{site} JobSpy error: {exc}"
+
+
+def _rate_limit_hint(site: str) -> str:
+    return (
+        f"{site} may be rate-limiting JobSpy. Paste the full job description as fallback, "
+        "or use an ATS/Workday URL. Install via bash scripts/install_jobspy.sh (not pip jobspy)."
+    )

@@ -1,7 +1,7 @@
 """Vertex AI Gemini chat models for LangGraph nodes."""
 
 from langchain_core.language_models import BaseChatModel
-from langchain_google_vertexai import ChatVertexAI
+from langchain_google_genai import ChatGoogleGenerativeAI
 
 from openrole.config import get_settings
 
@@ -23,9 +23,10 @@ def get_chat_model(
         model_name = settings.vertex_model_writing
     else:
         model_name = settings.vertex_model_default
-    return ChatVertexAI(
-        model_name=model_name,
+    return ChatGoogleGenerativeAI(
+        model=model_name,
         project=settings.gcp_project_id,
         location=settings.gcp_location,
+        vertexai=True,
         temperature=temperature,
     )
