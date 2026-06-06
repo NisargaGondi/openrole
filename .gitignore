@@ -2,6 +2,8 @@
 .env
 .env.*
 !.env.example
+gen-lang-client-*.json
+*-service-account*.json
 
 # Python
 __pycache__/
@@ -29,8 +31,12 @@ htmlcov/
 # Handshake MCP / browser profiles (local session)
 .handshake-mcp/
 
+# CareerShift browser profile (local session)
+.openrole/
+
 # Logs and local data
 *.log
-data/
+data/*
+!data/.gitkeep
 *.db
 *.sqlite3
