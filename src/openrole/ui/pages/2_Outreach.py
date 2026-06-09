@@ -2,16 +2,29 @@
 
 import streamlit as st
 from sqlalchemy import select
+from sqlalchemy.orm import joinedload
 
+from openrole.agents.email_writer import EmailWriterError, draft_outreach_for_job
 from openrole.db.models import Contact, Job, Outreach, OutreachStatus
-from openrole.db.repository import list_outreach_drafts
+from openrole.db.repository import list_contacts_for_job, list_outreach_drafts
 from openrole.db.session import get_session_factory
 
 
 def _job_options(factory) -> list[tuple[str, str]]:
     with factory() as session:
-        jobs = list(session.scalars(select(Job).order_by(Job.created_at.desc()).limit(30)))
-    return [(f"{j.title}", j.id) for j in jobs]
+        jobs = list(
+            session.scalars(
+                select(Job)
+                .options(joinedload(Job.company))
+                .order_by(Job.created_at.desc())
+                .limit(30)
+            ).unique()
+        )
+    labels: list[tuple[str, str]] = []
+    for job in jobs:
+        company = job.company.name if job.company else "—"
+        labels.append((f"{job.title} @ {company}", job.id))
+    return labels
 
 
 st.header("Outreach")
@@ -30,11 +43,61 @@ if job_filter != "All jobs":
             job_id = jid
             break
 
+if job_id:
+    with factory() as session:
+        job = session.get(Job, job_id)
+        contacts = (
+            list_contacts_for_job(
+                session,
+                company_id=job.company_id,
+                source_job_id=job_id,
+            )
+            if job and job.company_id
+            else []
+        )
+    st.subheader("Compose drafts")
+    if not contacts:
+        st.info("No contacts for this job yet — run **Find people** on the **Jobs** tab.")
+    else:
+        researched = sum(1 for c in contacts if c.research_brief)
+        st.write(
+            f"**{len(contacts)}** contact(s) for this role "
+            f"({researched} already researched)."
+        )
+        if st.button("Compose drafts for all contacts", type="primary"):
+            try:
+                with st.spinner(
+                    f"Researching (if needed) and drafting for {len(contacts)} contact(s)…"
+                ):
+                    result = draft_outreach_for_job(job_id=job_id, auto_research=True)
+                if result.get("drafted_count"):
+                    st.success(
+                        f"Created/updated drafts for **{result['drafted_count']}** "
+                        f"of {result['contact_count']} contact(s)."
+                    )
+                for row in result.get("drafted") or []:
+                    st.caption(f"✓ {row['full_name']}")
+                for row in result.get("skipped") or []:
+                    st.warning(f"Skipped {row['name']}: {row['reason']}")
+                for row in result.get("errors") or []:
+                    st.error(f"{row['name']}: {row['error']}")
+                for w in result.get("profile_warnings") or []:
+                    st.warning(w)
+                st.rerun()
+            except EmailWriterError as exc:
+                st.error(str(exc))
+            except Exception as exc:
+                st.error(f"Unexpected error: {exc}")
+    st.divider()
+
 with factory() as session:
     drafts = list_outreach_drafts(session, job_id=job_id, limit=50)
 
 if not drafts:
-    st.info("No outreach drafts yet. Run **Research** and **Draft outreach** from the Jobs page.")
+    st.info(
+        "No outreach drafts yet. Select a job above and click "
+        "**Compose drafts for all contacts**, or use **Draft** on the **Jobs** tab."
+    )
 else:
     for row in drafts:
         with factory() as session:

@@ -29,6 +29,8 @@ def load_candidate_profile(*, fetch_links: bool = True) -> dict[str, Any]:
         "linkedin_url": settings.candidate_linkedin_url,
         "github_url": settings.candidate_github_url,
         "website_url": settings.candidate_website_url,
+        "graduation": settings.candidate_graduation,
+        "role_search": settings.candidate_role_search,
         "resumes": [],
         "warnings": [],
     }
@@ -75,6 +77,8 @@ def profile_status() -> dict[str, Any]:
         "website_set": bool(settings.candidate_website_url),
         "resume_paths": [str(p) for p in paths],
         "resume_files_found": loaded,
+        "graduation_set": bool(settings.candidate_graduation),
+        "role_search": settings.candidate_role_search,
         "has_prompt_context": bool(profile.get("prompt_context")),
         "warnings": profile.get("warnings") or [],
     }
@@ -86,6 +90,10 @@ def _build_prompt_context(profile: dict[str, Any]) -> str:
         parts.append(f"Name: {profile['name']}")
     if profile.get("school"):
         parts.append(f"School: {profile['school']}")
+    if profile.get("graduation"):
+        parts.append(f"Graduation: {profile['graduation']}")
+    if profile.get("role_search"):
+        parts.append(f"Seeking: {profile['role_search']}")
     for key, label in (
         ("linkedin_url", "LinkedIn"),
         ("github_url", "GitHub"),

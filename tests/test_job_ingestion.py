@@ -36,7 +36,7 @@ def test_heuristic_text_ingest(monkeypatch):
 
     monkeypatch.setattr(
         "openrole.agents.job_ingestion.get_settings",
-        lambda: type("S", (), {"vertex_configured": False})(),
+        lambda: type("S", (), {"llm_configured": False})(),
     )
 
     init_db()

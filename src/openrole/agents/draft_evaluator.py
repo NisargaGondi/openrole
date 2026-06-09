@@ -10,10 +10,16 @@ from langchain_core.messages import HumanMessage, SystemMessage
 from pydantic import BaseModel, Field
 
 from openrole.agents.email_writer import EmailWriterError, _generate_drafts
+from openrole.agents.outreach_prompts import (
+    evaluation_criteria_for_tier,
+    resolve_contact_tier,
+    tier_label,
+)
 from openrole.db.models import Contact, Job
 from openrole.db.repository import save_outreach_draft
 from openrole.db.session import session_scope
-from openrole.llm.vertex import get_chat_model
+from openrole.config import get_settings
+from openrole.llm import get_chat_model
 from openrole.tools.candidate_profile import load_candidate_profile
 
 
@@ -39,8 +45,15 @@ def evaluate_drafts(
     except RuntimeError as exc:
         raise EmailWriterError(str(exc)) from exc
 
+    settings = get_settings()
+    tier = resolve_contact_tier(contact)
     context = {
-        "contact": {"name": contact.full_name, "title": contact.title},
+        "contact": {
+            "name": contact.full_name,
+            "title": contact.title,
+            "tier": tier.name,
+            "tier_label": tier_label(tier),
+        },
         "job": {
             "title": job.title,
             "company": contact.company.name if contact.company else None,
@@ -50,13 +63,11 @@ def evaluate_drafts(
         "email_subject": email.get("subject"),
         "email_body": email.get("body"),
         "linkedin_body": linkedin.get("body"),
-        "criteria": [
-            "Specific hook from research (not generic)",
-            "Under length limits (email ~150 words, LinkedIn ~280 chars)",
-            "Professional human tone, no corporate boilerplate",
-            "Clear ask without being pushy",
-            "No placeholders or invented facts",
-        ],
+        "criteria": evaluation_criteria_for_tier(
+            tier,
+            graduation=settings.candidate_graduation,
+            role_search=settings.candidate_role_search,
+        ),
     }
     system = (
         "You evaluate cold outreach drafts for technical job seekers. "

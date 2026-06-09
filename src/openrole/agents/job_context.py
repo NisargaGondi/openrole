@@ -10,7 +10,7 @@ from langchain_core.messages import HumanMessage, SystemMessage
 
 from openrole.config import get_settings
 from openrole.db.models import Job
-from openrole.llm.vertex import get_chat_model
+from openrole.llm import get_chat_model
 from openrole.schemas.job_context import JobSearchContext
 
 # Common US cities when JD lists multi-site roles in prose.
@@ -38,7 +38,7 @@ def build_job_search_context(job: Job) -> JobSearchContext:
         office_locations=list(job.locations or []),
         department_name=job.department,
     )
-    if not job.description or not get_settings().vertex_configured:
+    if not job.description or not get_settings().llm_configured:
         return _heuristic_context(job, base)
 
     try:

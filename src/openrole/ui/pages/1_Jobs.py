@@ -175,7 +175,7 @@ with tab_list:
                                 result = discover_and_prepare_outreach_via_graph(job.id)
                             _show_discovery_result(result)
                             if result.get("interrupted") or result.get("__interrupt__"):
-        st.info("Pipeline paused — open **Pipeline** tab to continue after reviewing drafts.")
+                                st.info("Pipeline paused — open **Pipeline** tab to continue after reviewing drafts.")
                             if result.get("outreach_drafts"):
                                 st.success(f"Created {len(result['outreach_drafts'])} draft(s) — see Outreach tab")
                             if result.get("interrupted") or result.get("__interrupt__"):
