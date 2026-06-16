@@ -21,22 +21,12 @@ st.header("Settings")
 settings = get_settings()
 
 st.subheader("Core")
-ingestion_model = (
-    settings.vertex_model_ingestion
-    if settings.llm_provider == "vertex"
-    else settings.openai_model_ingestion
-)
-writing_model = (
-    settings.vertex_model_writing
-    if settings.llm_provider == "vertex"
-    else settings.openai_model_writing
-)
 st.code(
     f"""APP_ENV={settings.app_env}
 DATABASE={settings.masked_database_url()}
-LLM_PROVIDER={settings.llm_provider}
-INGESTION_MODEL={ingestion_model}
-WRITING_MODEL={writing_model}
+LLM_PROVIDER={settings.llm_provider_choice} → active: {settings.resolved_llm_provider}
+INGESTION_MODEL={settings.ingestion_model_name()}
+WRITING_MODEL={settings.writing_model_name()}
 """,
     language="text",
 )
@@ -49,9 +39,14 @@ rows = [
         "GCP_PROJECT_ID + GOOGLE_APPLICATION_CREDENTIALS",
     ),
     (
-        "OpenAI",
+        "Fireworks AI",
+        settings.fireworks_configured,
+        "FIREWORKS_API_KEY (+ FIREWORKS_BASE_URL)",
+    ),
+    (
+        "OpenRouter / OpenAI",
         settings.openai_configured,
-        "OPENAI_API_KEY (+ optional OPENAI_API_BASE for OpenRouter)",
+        "OPENAI_API_KEY (+ OPENAI_API_BASE for OpenRouter)",
     ),
     ("JobSpy (LinkedIn / Indeed)", jobspy_client.is_available(), "bash scripts/install_jobspy.sh"),
     (

@@ -58,6 +58,17 @@ python scripts/check_env.py         # validate .env without printing secrets
 
 **Minimum `.env` for a useful demo:** `GCP_PROJECT_ID`, `CANDIDATE_NAME`, `CANDIDATE_RESUME_PATHS` (path to a `.pdf`/`.md` resume). Add `APOLLO_API_KEY` for people discovery.
 
+### LLM providers (pick one)
+
+Set `LLM_PROVIDER=auto|vertex|fireworks|openrouter|openai` in `.env`. With `auto` (default), priority is **Vertex → Fireworks → OpenRouter/OpenAI**.
+
+| Provider | Keys | Notes |
+|----------|------|-------|
+| **Vertex** | `GCP_PROJECT_ID` + ADC or service account JSON | Gemini — preferred when GCP creds work |
+| **Fireworks** | `FIREWORKS_API_KEY` | OpenAI-compatible; copy from `SummerRA/SED/.env` via `python scripts/merge_fireworks_env.py` |
+| **OpenRouter** | `OPENAI_API_KEY=sk-or-...` + `OPENAI_API_BASE` | Free/cheap models (Sagar's setup) |
+| **OpenAI** | `OPENAI_API_KEY` | Direct OpenAI API |
+
 ---
 
 ## Security — do not commit secrets

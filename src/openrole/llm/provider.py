@@ -1,4 +1,4 @@
-"""Route LLM calls to Vertex AI (preferred) or OpenAI (fallback)."""
+"""Route LLM calls to Vertex AI, Fireworks, OpenRouter, or OpenAI."""
 
 from langchain_core.language_models import BaseChatModel
 
@@ -11,21 +11,26 @@ def get_chat_model(
     ingestion: bool = False,
     temperature: float = 0.2,
 ) -> BaseChatModel:
-    """Return a chat model using Vertex AI when configured, otherwise OpenAI."""
+    """Return a chat model for the active LLM_PROVIDER (or auto-detected fallback)."""
     settings = get_settings()
-    if settings.vertex_ready:
+    provider = settings.resolved_llm_provider
+
+    if provider == "vertex":
         from openrole.llm.vertex import get_chat_model as get_vertex_chat_model
 
         return get_vertex_chat_model(
             writing=writing, ingestion=ingestion, temperature=temperature
         )
-    if settings.openai_configured:
-        from openrole.llm.openai_client import get_openai_chat_model
+    if provider == "fireworks":
+        from openrole.llm.compatible import get_fireworks_chat_model
+
+        return get_fireworks_chat_model(
+            writing=writing, ingestion=ingestion, temperature=temperature
+        )
+    if provider in ("openrouter", "openai"):
+        from openrole.llm.compatible import get_openai_chat_model
 
         return get_openai_chat_model(
             writing=writing, ingestion=ingestion, temperature=temperature
         )
-    raise RuntimeError(
-        "No LLM configured. Set GCP_PROJECT_ID + Google credentials for Vertex AI, "
-        "or set OPENAI_API_KEY for OpenAI."
-    )
+    raise RuntimeError(settings.llm_configuration_hint())

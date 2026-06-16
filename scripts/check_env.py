@@ -17,7 +17,7 @@ def main() -> int:
     ok.append(f"APP_ENV={settings.app_env}")
     ok.append(f"DATABASE_URL={settings.masked_database_url()}")
 
-    if settings.vertex_ready:
+    if settings.resolved_llm_provider == "vertex":
         ok.append(f"Vertex AI ready (project={settings.gcp_project_id})")
     elif settings.vertex_configured:
         ok.append(f"GCP_PROJECT_ID set ({len(settings.gcp_project_id or '')} chars)")
@@ -25,17 +25,20 @@ def main() -> int:
             "GOOGLE_APPLICATION_CREDENTIALS file not found — set path in .env or run "
             "`gcloud auth application-default login`"
         )
-    elif settings.openai_configured:
-        ok.append(f"OpenAI ready (provider={settings.llm_provider})")
+    elif settings.resolved_llm_provider == "fireworks":
+        ok.append("Fireworks AI ready")
+    elif settings.resolved_llm_provider in ("openrouter", "openai"):
+        ok.append(f"OpenAI-compatible ready (provider={settings.resolved_llm_provider})")
+    elif settings.llm_configured:
+        ok.append(f"LLM provider={settings.resolved_llm_provider}")
     else:
-        issues.append(
-            "No LLM configured — set OPENAI_API_KEY, or GCP_PROJECT_ID + Google credentials"
-        )
+        issues.append(settings.llm_configuration_hint().split("\n")[0])
 
-    if settings.openai_configured and settings.llm_provider == "openai":
+    if settings.openai_configured:
         ok.append("OPENAI_API_KEY set")
-    elif settings.openai_configured and settings.vertex_ready:
-        ok.append("OPENAI_API_KEY set (Vertex preferred when both are configured)")
+    if settings.fireworks_configured:
+        ok.append("FIREWORKS_API_KEY set")
+    ok.append(f"LLM_PROVIDER choice={settings.llm_provider_choice} → active={settings.resolved_llm_provider}")
 
     if not settings.apollo_api_key:
         ok.append("APOLLO_API_KEY empty (OK until milestone 2–3)")
@@ -55,12 +58,8 @@ def main() -> int:
             model = get_chat_model()
             reply = model.invoke("Reply with exactly: openrole-ok")
             text = getattr(reply, "content", str(reply))
-            provider = settings.llm_provider
-            model_name = (
-                settings.vertex_model_default
-                if provider == "vertex"
-                else settings.openai_model_default
-            )
+            provider = settings.resolved_llm_provider
+            model_name = settings.ingestion_model_name()
             ok.append(f"LLM ping OK ({provider}, model={model_name})")
             if "openrole" not in str(text).lower():
                 ok.append(f"LLM reply snippet: {str(text)[:80]}...")

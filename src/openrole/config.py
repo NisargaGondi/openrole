@@ -10,7 +10,9 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 OPENROUTER_API_BASE = "https://openrouter.ai/api/v1"
+FIREWORKS_API_BASE = "https://api.fireworks.ai/inference/v1"
 _OPENAI_BUILTIN_MODELS = frozenset({"gpt-4o-mini", "gpt-4o", "gpt-4", "gpt-4-turbo"})
+_VALID_LLM_PROVIDERS = frozenset({"auto", "vertex", "fireworks", "openrouter", "openai"})
 
 # Load all .env keys into os.environ (needed for GOOGLE_APPLICATION_CREDENTIALS).
 load_dotenv(_REPO_ROOT / ".env", override=False)
@@ -54,11 +56,44 @@ class Settings(BaseSettings):
         cleaned = str(value).strip().strip('"').strip("'")
         return cleaned or None
 
+    @field_validator("fireworks_api_key", "fireworks_api_base", mode="before")
+    @classmethod
+    def _strip_fireworks_str(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        cleaned = str(value).strip().strip('"').strip("'")
+        return cleaned or None
+
+    @field_validator("llm_provider_choice", mode="before")
+    @classmethod
+    def _normalize_llm_provider(cls, value: str | None) -> str:
+        if not value:
+            return "auto"
+        return str(value).strip().lower()
+
+    llm_provider_choice: str = Field(default="auto", alias="LLM_PROVIDER")
+
     openai_api_key: str | None = Field(default=None, alias="OPENAI_API_KEY")
     openai_api_base: str | None = Field(default=None, alias="OPENAI_API_BASE")
     openai_model_default: str = Field(default="gpt-4o-mini", alias="OPENAI_MODEL_DEFAULT")
     openai_model_ingestion: str = Field(default="gpt-4o-mini", alias="OPENAI_MODEL_INGESTION")
     openai_model_writing: str = Field(default="gpt-4o", alias="OPENAI_MODEL_WRITING")
+
+    fireworks_api_key: str | None = Field(default=None, alias="FIREWORKS_API_KEY")
+    fireworks_api_base: str = Field(default=FIREWORKS_API_BASE, alias="FIREWORKS_BASE_URL")
+    fireworks_model_default: str = Field(
+        default="accounts/fireworks/models/deepseek-v4-flash",
+        alias="FIREWORKS_MODEL_DEFAULT",
+    )
+    fireworks_model_ingestion: str = Field(
+        default="accounts/fireworks/models/deepseek-v4-flash",
+        alias="FIREWORKS_MODEL_INGESTION",
+    )
+    fireworks_model_writing: str = Field(
+        default="accounts/fireworks/models/deepseek-v4-pro",
+        alias="FIREWORKS_MODEL_WRITING",
+    )
+
     apollo_api_key: str | None = Field(default=None, alias="APOLLO_API_KEY")
     cmu_email_domain: str = Field(default="andrew.cmu.edu", alias="CMU_EMAIL_DOMAIN")
     cmu_school_name: str = Field(default="Carnegie Mellon", alias="CMU_SCHOOL_NAME")
@@ -89,12 +124,70 @@ class Settings(BaseSettings):
         return bool(self.openai_api_key)
 
     @property
+    def fireworks_configured(self) -> bool:
+        return bool(self.fireworks_api_key)
+
+    @property
     def vertex_ready(self) -> bool:
         return self.vertex_configured and self.gcp_credentials_ready
 
     @property
     def llm_configured(self) -> bool:
-        return self.vertex_ready or self.openai_configured
+        return self.vertex_ready or self.fireworks_configured or self.openai_configured
+
+    def _auto_llm_provider(self) -> str:
+        """Pick provider when LLM_PROVIDER=auto."""
+        if self.vertex_ready:
+            return "vertex"
+        if self.fireworks_configured:
+            return "fireworks"
+        if self.openai_configured:
+            return "openrouter" if self.using_openrouter else "openai"
+        return "none"
+
+    @property
+    def resolved_llm_provider(self) -> str:
+        choice = self.llm_provider_choice
+        if choice == "auto":
+            return self._auto_llm_provider()
+        if choice not in _VALID_LLM_PROVIDERS:
+            return self._auto_llm_provider()
+        if choice == "vertex" and self.vertex_ready:
+            return "vertex"
+        if choice == "fireworks" and self.fireworks_configured:
+            return "fireworks"
+        if choice == "openrouter" and self.openai_configured and self.using_openrouter:
+            return "openrouter"
+        if choice == "openai" and self.openai_configured and not self.using_openrouter:
+            return "openai"
+        # Requested provider not configured — fall back
+        return self._auto_llm_provider()
+
+    def llm_configuration_hint(self) -> str:
+        return (
+            "No LLM configured. Set one of:\n"
+            "  • Vertex: GCP_PROJECT_ID + GOOGLE_APPLICATION_CREDENTIALS\n"
+            "  • Fireworks: FIREWORKS_API_KEY (see SummerRA/SED/.env)\n"
+            "  • OpenRouter: OPENAI_API_KEY=sk-or-... + OPENAI_API_BASE\n"
+            "  • OpenAI: OPENAI_API_KEY\n"
+            "Optional: LLM_PROVIDER=auto|vertex|fireworks|openrouter|openai"
+        )
+
+    def ingestion_model_name(self) -> str:
+        p = self.resolved_llm_provider
+        if p == "vertex":
+            return self.vertex_model_ingestion
+        if p == "fireworks":
+            return self.fireworks_model_ingestion
+        return self.openai_model_ingestion
+
+    def writing_model_name(self) -> str:
+        p = self.resolved_llm_provider
+        if p == "vertex":
+            return self.vertex_model_writing
+        if p == "fireworks":
+            return self.fireworks_model_writing
+        return self.openai_model_writing
 
     @property
     def is_openrouter_key(self) -> bool:
@@ -126,11 +219,7 @@ class Settings(BaseSettings):
 
     @property
     def llm_provider(self) -> str:
-        if self.vertex_ready:
-            return "vertex"
-        if self.openai_configured:
-            return "openrouter" if self.using_openrouter else "openai"
-        return "none"
+        return self.resolved_llm_provider
 
     @property
     def gcp_credentials_ready(self) -> bool:
