@@ -11,7 +11,7 @@ from langchain_core.messages import HumanMessage, SystemMessage
 from openrole.db.models import Job
 from openrole.db.repository import save_job_resume_analysis, sync_resumes_from_env
 from openrole.db.session import session_scope
-from openrole.llm.vertex import get_chat_model
+from openrole.llm import get_chat_model
 from openrole.schemas.resume_analysis import ResumeEditSuggestion, ResumeOptimizationReport
 from openrole.tools.candidate_profile import load_candidate_profile
 

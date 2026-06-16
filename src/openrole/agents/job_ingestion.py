@@ -10,7 +10,7 @@ from langchain_core.messages import HumanMessage, SystemMessage
 
 from openrole.config import get_settings
 from openrole.db.repository import save_parsed_job
-from openrole.llm.vertex import get_chat_model
+from openrole.llm import get_chat_model
 from openrole.schemas.job import ParsedJob
 from openrole.scrapers.ats_apis import fetch_from_ats
 from openrole.scrapers.handshake_client import (
@@ -180,7 +180,7 @@ def _ingest_from_text(text: str) -> ParsedJob:
     cleaned = text.strip()
     if not cleaned:
         raise JobIngestionError("Job description text is empty")
-    if get_settings().vertex_configured:
+    if get_settings().llm_configured:
         return _extract_with_llm(cleaned)
     return _heuristic_parse(cleaned)
 

@@ -9,6 +9,8 @@ from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
+OPENROUTER_API_BASE = "https://openrouter.ai/api/v1"
+_OPENAI_BUILTIN_MODELS = frozenset({"gpt-4o-mini", "gpt-4o", "gpt-4", "gpt-4-turbo"})
 
 # Load all .env keys into os.environ (needed for GOOGLE_APPLICATION_CREDENTIALS).
 load_dotenv(_REPO_ROOT / ".env", override=False)
@@ -44,7 +46,19 @@ class Settings(BaseSettings):
         cleaned = str(value).strip().strip('"').strip("'")
         return cleaned or None
 
+    @field_validator("openai_api_key", "openai_api_base", mode="before")
+    @classmethod
+    def _strip_optional_str(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        cleaned = str(value).strip().strip('"').strip("'")
+        return cleaned or None
+
     openai_api_key: str | None = Field(default=None, alias="OPENAI_API_KEY")
+    openai_api_base: str | None = Field(default=None, alias="OPENAI_API_BASE")
+    openai_model_default: str = Field(default="gpt-4o-mini", alias="OPENAI_MODEL_DEFAULT")
+    openai_model_ingestion: str = Field(default="gpt-4o-mini", alias="OPENAI_MODEL_INGESTION")
+    openai_model_writing: str = Field(default="gpt-4o", alias="OPENAI_MODEL_WRITING")
     apollo_api_key: str | None = Field(default=None, alias="APOLLO_API_KEY")
     cmu_email_domain: str = Field(default="andrew.cmu.edu", alias="CMU_EMAIL_DOMAIN")
     cmu_school_name: str = Field(default="Carnegie Mellon", alias="CMU_SCHOOL_NAME")
@@ -56,6 +70,8 @@ class Settings(BaseSettings):
     candidate_github_url: str | None = Field(default=None, alias="CANDIDATE_GITHUB_URL")
     candidate_website_url: str | None = Field(default=None, alias="CANDIDATE_WEBSITE_URL")
     candidate_resume_paths: str | None = Field(default=None, alias="CANDIDATE_RESUME_PATHS")
+    candidate_graduation: str | None = Field(default=None, alias="CANDIDATE_GRADUATION")
+    candidate_role_search: str = Field(default="full-time roles", alias="CANDIDATE_ROLE_SEARCH")
 
     notion_api_key: str | None = Field(default=None, alias="NOTION_API_KEY")
     notion_jobs_database_id: str | None = Field(default=None, alias="NOTION_JOBS_DATABASE_ID")
@@ -67,6 +83,54 @@ class Settings(BaseSettings):
     @property
     def vertex_configured(self) -> bool:
         return bool(self.gcp_project_id)
+
+    @property
+    def openai_configured(self) -> bool:
+        return bool(self.openai_api_key)
+
+    @property
+    def vertex_ready(self) -> bool:
+        return self.vertex_configured and self.gcp_credentials_ready
+
+    @property
+    def llm_configured(self) -> bool:
+        return self.vertex_ready or self.openai_configured
+
+    @property
+    def is_openrouter_key(self) -> bool:
+        return bool(self.openai_api_key and self.openai_api_key.startswith("sk-or-"))
+
+    @property
+    def using_openrouter(self) -> bool:
+        if self.openai_api_base and "openrouter.ai" in self.openai_api_base:
+            return True
+        return self.is_openrouter_key
+
+    @property
+    def resolved_openai_api_base(self) -> str | None:
+        if self.openai_api_base:
+            return self.openai_api_base.rstrip("/")
+        if self.is_openrouter_key:
+            return OPENROUTER_API_BASE
+        return None
+
+    def resolve_openai_model(self, model_name: str) -> str:
+        """Map plain OpenAI model IDs to OpenRouter slugs when needed."""
+        if not self.using_openrouter:
+            return model_name
+        if "/" in model_name or model_name.startswith("openrouter"):
+            return model_name
+        if model_name in _OPENAI_BUILTIN_MODELS:
+            return "openrouter/free"
+        return model_name
+
+    @property
+    def llm_provider(self) -> str:
+        if self.vertex_ready:
+            return "vertex"
+        if self.openai_configured:
+            return "openrouter" if self.using_openrouter else "openai"
+        return "none"
 
     @property
     def gcp_credentials_ready(self) -> bool:

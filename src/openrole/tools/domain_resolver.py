@@ -176,12 +176,12 @@ def _resolve_via_llm(
     description: str | None,
 ) -> str | None:
     settings = get_settings()
-    if not settings.vertex_configured:
+    if not settings.llm_configured:
         return None
     try:
         from langchain_core.messages import HumanMessage, SystemMessage
 
-        from openrole.llm.vertex import get_chat_model
+        from openrole.llm import get_chat_model
 
         context_parts = [f"Company: {company_name}"]
         if source_url:

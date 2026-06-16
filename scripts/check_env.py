@@ -1,9 +1,8 @@
 #!/usr/bin/env python3
-"""Validate .env and optional Vertex AI connectivity. Does not print secrets."""
+"""Validate .env and optional LLM connectivity. Does not print secrets."""
 
 from __future__ import annotations
 
-import os
 import sys
 
 from openrole.config import get_settings
@@ -18,18 +17,25 @@ def main() -> int:
     ok.append(f"APP_ENV={settings.app_env}")
     ok.append(f"DATABASE_URL={settings.masked_database_url()}")
 
-    if settings.gcp_project_id:
-        ok.append(f"GCP_PROJECT_ID set ({len(settings.gcp_project_id)} chars)")
-    else:
-        issues.append("GCP_PROJECT_ID is missing")
-
-    if settings.gcp_credentials_ready:
-        ok.append("GCP credentials path exists or ADC env is set")
-    else:
+    if settings.vertex_ready:
+        ok.append(f"Vertex AI ready (project={settings.gcp_project_id})")
+    elif settings.vertex_configured:
+        ok.append(f"GCP_PROJECT_ID set ({len(settings.gcp_project_id or '')} chars)")
         issues.append(
             "GOOGLE_APPLICATION_CREDENTIALS file not found — set path in .env or run "
             "`gcloud auth application-default login`"
         )
+    elif settings.openai_configured:
+        ok.append(f"OpenAI ready (provider={settings.llm_provider})")
+    else:
+        issues.append(
+            "No LLM configured — set OPENAI_API_KEY, or GCP_PROJECT_ID + Google credentials"
+        )
+
+    if settings.openai_configured and settings.llm_provider == "openai":
+        ok.append("OPENAI_API_KEY set")
+    elif settings.openai_configured and settings.vertex_ready:
+        ok.append("OPENAI_API_KEY set (Vertex preferred when both are configured)")
 
     if not settings.apollo_api_key:
         ok.append("APOLLO_API_KEY empty (OK until milestone 2–3)")
@@ -42,18 +48,24 @@ def main() -> int:
     except Exception as exc:
         issues.append(f"Database init failed: {exc}")
 
-    if settings.vertex_configured and settings.gcp_credentials_ready:
+    if settings.llm_configured:
         try:
-            from openrole.llm.vertex import get_chat_model
+            from openrole.llm import get_chat_model
 
             model = get_chat_model()
             reply = model.invoke("Reply with exactly: openrole-ok")
             text = getattr(reply, "content", str(reply))
-            ok.append(f"Vertex AI ping OK (model={settings.vertex_model_default})")
+            provider = settings.llm_provider
+            model_name = (
+                settings.vertex_model_default
+                if provider == "vertex"
+                else settings.openai_model_default
+            )
+            ok.append(f"LLM ping OK ({provider}, model={model_name})")
             if "openrole" not in str(text).lower():
-                ok.append(f"Vertex reply snippet: {str(text)[:80]}...")
+                ok.append(f"LLM reply snippet: {str(text)[:80]}...")
         except Exception as exc:
-            issues.append(f"Vertex AI call failed: {exc}")
+            issues.append(f"LLM call failed ({settings.llm_provider}): {exc}")
 
     print("OpenRole environment check\n")
     for line in ok:

@@ -21,11 +21,22 @@ st.header("Settings")
 settings = get_settings()
 
 st.subheader("Core")
+ingestion_model = (
+    settings.vertex_model_ingestion
+    if settings.llm_provider == "vertex"
+    else settings.openai_model_ingestion
+)
+writing_model = (
+    settings.vertex_model_writing
+    if settings.llm_provider == "vertex"
+    else settings.openai_model_writing
+)
 st.code(
     f"""APP_ENV={settings.app_env}
 DATABASE={settings.masked_database_url()}
-INGESTION_MODEL={settings.vertex_model_ingestion}
-WRITING_MODEL={settings.vertex_model_writing}
+LLM_PROVIDER={settings.llm_provider}
+INGESTION_MODEL={ingestion_model}
+WRITING_MODEL={writing_model}
 """,
     language="text",
 )
@@ -34,8 +45,13 @@ st.subheader("Integrations")
 rows = [
     (
         "Vertex AI (Gemini)",
-        settings.vertex_configured and settings.gcp_credentials_ready,
+        settings.vertex_ready,
         "GCP_PROJECT_ID + GOOGLE_APPLICATION_CREDENTIALS",
+    ),
+    (
+        "OpenAI",
+        settings.openai_configured,
+        "OPENAI_API_KEY (+ optional OPENAI_API_BASE for OpenRouter)",
     ),
     ("JobSpy (LinkedIn / Indeed)", jobspy_client.is_available(), "bash scripts/install_jobspy.sh"),
     (
@@ -49,7 +65,6 @@ rows = [
         "bash scripts/install_careershift.sh && python scripts/careershift_login.py --clear-profile --force",
     ),
     ("Apollo.io", bool(settings.apollo_api_key), "APOLLO_API_KEY"),
-    ("OpenAI (fallback)", bool(settings.openai_api_key), "OPENAI_API_KEY"),
     ("Tavily search", bool(settings.tavily_api_key), "TAVILY_API_KEY"),
     ("Notion sync", bool(settings.notion_api_key), "NOTION_API_KEY"),
 ]
@@ -61,10 +76,16 @@ st.divider()
 st.subheader("Candidate profile (outreach drafts)")
 st.caption(
     "Set in `.env`: `CANDIDATE_NAME`, `CANDIDATE_RESUME_PATHS` (comma-separated), "
-    "`CANDIDATE_LINKEDIN_URL`, `CANDIDATE_GITHUB_URL`, `CANDIDATE_WEBSITE_URL`"
+    "`CANDIDATE_LINKEDIN_URL`, `CANDIDATE_GITHUB_URL`, `CANDIDATE_WEBSITE_URL`, "
+    "`CANDIDATE_GRADUATION`, `CANDIDATE_ROLE_SEARCH`"
 )
 status = profile_status()
 st.write(f"**Name:** {'✓ ' + (get_settings().candidate_name or '') if status['name_set'] else '○ not set'}")
+st.write(
+    f"**Graduation:** "
+    f"{'✓ ' + (get_settings().candidate_graduation or '') if status['graduation_set'] else '○ not set'}"
+)
+st.write(f"**Role search:** {status['role_search']}")
 st.write(f"**LinkedIn:** {'✓' if status['linkedin_set'] else '○'}")
 st.write(f"**GitHub:** {'✓' if status['github_set'] else '○'}")
 st.write(f"**Website:** {'✓' if status['website_set'] else '○'}")

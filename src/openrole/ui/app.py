@@ -33,7 +33,11 @@ with col1:
 with col2:
     st.metric("Database", "SQLite" if settings.is_sqlite else "PostgreSQL")
 with col3:
-    st.metric("Vertex AI", "ready" if settings.vertex_configured else "not configured")
+    if settings.llm_configured:
+        label = settings.llm_provider.upper()
+    else:
+        label = "not configured"
+    st.metric("LLM", label)
 
 st.divider()
 

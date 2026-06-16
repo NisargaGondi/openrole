@@ -12,7 +12,7 @@ from sqlalchemy import select
 from openrole.db.models import Contact, Job
 from openrole.db.repository import save_research_brief
 from openrole.db.session import session_scope
-from openrole.llm.vertex import get_chat_model
+from openrole.llm import get_chat_model
 from openrole.schemas.research import PersonResearchBrief
 from openrole.tools import apollo_client
 from openrole.tools.web_search import is_configured as tavily_ready
