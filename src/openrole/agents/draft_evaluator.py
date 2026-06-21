@@ -11,10 +11,13 @@ from pydantic import BaseModel, Field
 
 from openrole.agents.email_writer import EmailWriterError, _generate_drafts
 from openrole.agents.outreach_prompts import (
+    build_evaluator_system_prompt,
     evaluation_criteria_for_tier,
+    get_tier_template,
     resolve_contact_tier,
     tier_label,
 )
+from openrole.schemas.contact import ContactTier
 from openrole.db.models import Contact, Job
 from openrole.db.repository import save_outreach_draft
 from openrole.db.session import session_scope
@@ -47,6 +50,7 @@ def evaluate_drafts(
 
     settings = get_settings()
     tier = resolve_contact_tier(contact)
+    research_angles = list(brief.get("outreach_angles") or [])
     context = {
         "contact": {
             "name": contact.full_name,
@@ -59,33 +63,85 @@ def evaluate_drafts(
             "company": contact.company.name if contact.company else None,
             "department": job.department,
         },
-        "research_hook": brief.get("suggested_hook"),
+        "research_primary_hook": brief.get("suggested_hook"),
+        "research_summary": brief.get("summary"),
+        "research_angles": research_angles[:3],
         "email_subject": email.get("subject"),
         "email_body": email.get("body"),
+        "email_word_count": len(str(email.get("body") or "").split()),
         "linkedin_body": linkedin.get("body"),
+        "linkedin_char_count": len(str(linkedin.get("body") or "")),
         "criteria": evaluation_criteria_for_tier(
             tier,
             graduation=settings.candidate_graduation,
             role_search=settings.candidate_role_search,
         ),
     }
-    system = (
-        "You evaluate cold outreach drafts for technical job seekers. "
-        "Return ONLY JSON: "
-        '{"acceptable": bool, "grade": "good"|"needs_work", "feedback": "actionable", '
-        '"email_score": 0-100, "linkedin_score": 0-100}. '
-        "acceptable=true only if both drafts would plausibly get a reply from this contact."
-    )
+    system = build_evaluator_system_prompt(tier=tier)
     response = model.invoke(
         [SystemMessage(content=system), HumanMessage(content=json.dumps(context)[:50_000])]
     )
     data = _parse_json(str(response.content))
-    return DraftEvaluation(
+    evaluation = DraftEvaluation(
         acceptable=bool(data.get("acceptable")),
         grade="good" if data.get("grade") == "good" else "needs_work",
         feedback=str(data.get("feedback") or ""),
         email_score=int(data.get("email_score") or 0),
         linkedin_score=int(data.get("linkedin_score") or 0),
+    )
+    return _apply_hard_gates(
+        evaluation,
+        tier=tier,
+        email_body=str(email.get("body") or ""),
+        linkedin_body=str(linkedin.get("body") or ""),
+    )
+
+
+def _apply_hard_gates(
+    evaluation: DraftEvaluation,
+    *,
+    tier: ContactTier,
+    email_body: str,
+    linkedin_body: str,
+) -> DraftEvaluation:
+    """Enforce non-negotiable length/tier rules after LLM scoring."""
+    feedback_parts: list[str] = []
+    acceptable = evaluation.acceptable
+    email_words = len(email_body.split())
+    linkedin_chars = len(linkedin_body)
+
+    if tier == ContactTier.EXECUTIVE and email_words > 120:
+        acceptable = False
+        feedback_parts.append(
+            f"Email is {email_words} words; executive tier must be under ~100 words. "
+            "Shorten to a routing ask — who owns hiring for this role?"
+        )
+
+    template = get_tier_template(tier)
+    linkedin_limit = 280
+    if linkedin_chars > linkedin_limit:
+        acceptable = False
+        feedback_parts.append(
+            f"LinkedIn note is {linkedin_chars} characters; max {linkedin_limit}. "
+            f"Trim to a {template.get('linkedin_chars', '250-280')} connection note."
+        )
+
+    if not feedback_parts:
+        return evaluation
+
+    merged_feedback = " ".join(feedback_parts)
+    if evaluation.feedback:
+        merged_feedback = f"{merged_feedback} {evaluation.feedback}"
+
+    return DraftEvaluation(
+        acceptable=acceptable,
+        grade="needs_work",
+        feedback=merged_feedback.strip(),
+        email_score=min(evaluation.email_score, 70 if tier == ContactTier.EXECUTIVE and email_words > 120 else evaluation.email_score),
+        linkedin_score=min(
+            evaluation.linkedin_score,
+            70 if linkedin_chars > linkedin_limit else evaluation.linkedin_score,
+        ),
     )
 
 

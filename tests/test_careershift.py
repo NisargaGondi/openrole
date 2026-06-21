@@ -93,7 +93,18 @@ def test_parse_result_card_text():
     assert "Director" in (parsed["title"] or "")
 
 
-def test_to_ranking_person_marks_source():
+def test_scan_text_for_email_skips_placeholders():
+    from openrole.scrapers.careershift_client import _scan_text_for_email
+
+    assert _scan_text_for_email("Email\nmatthias@anthropic.com\nLocation") == "matthias@anthropic.com"
+    assert _scan_text_for_email("email@example.com") is None
+
+
+def test_scan_text_for_email_ignores_careershift_domain():
+    from openrole.scrapers.careershift_client import _scan_text_for_email
+
+    assert _scan_text_for_email("support@careershift.com\npat@anthropic.com") == "pat@anthropic.com"
+
     normalized = _normalize_contact_row(
         {
             "contactId": "99",
@@ -107,3 +118,27 @@ def test_to_ranking_person_marks_source():
     assert person["id"] == "cs:99"
     assert person["_openrole_careershift"] is True
     assert person["has_email"] is True
+
+
+def test_best_name_match_prefers_exact():
+    from openrole.scrapers.careershift_client import _best_name_match, to_ranking_person
+
+    rows = [
+        to_ranking_person(
+            {
+                "full_name": "Jane Doe",
+                "title": "Engineer",
+                "email": "jane@co.com",
+            }
+        ),
+        to_ranking_person(
+            {
+                "full_name": "John Smith",
+                "title": "Recruiter",
+                "email": "john@co.com",
+            }
+        ),
+    ]
+    match = _best_name_match(rows, "Jane Doe")
+    assert match is not None
+    assert match.get("first_name") == "Jane" or "Jane" in str(match)

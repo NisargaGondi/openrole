@@ -40,6 +40,8 @@ def get_openai_chat_model(
     *,
     writing: bool = False,
     ingestion: bool = False,
+    research: bool = False,
+    fast: bool = False,
     temperature: float = 0.2,
 ) -> BaseChatModel:
     settings = get_settings()
@@ -47,8 +49,10 @@ def get_openai_chat_model(
         raise RuntimeError(
             "OPENAI_API_KEY is not set. Add it to .env before using OpenAI/OpenRouter."
         )
-    if ingestion:
+    if fast or ingestion:
         model_name = settings.openai_model_ingestion
+    elif research:
+        model_name = settings.openai_model_writing
     elif writing:
         model_name = settings.openai_model_writing
     else:
@@ -67,6 +71,8 @@ def get_fireworks_chat_model(
     *,
     writing: bool = False,
     ingestion: bool = False,
+    research: bool = False,
+    fast: bool = False,
     temperature: float = 0.2,
 ) -> BaseChatModel:
     settings = get_settings()
@@ -74,11 +80,19 @@ def get_fireworks_chat_model(
         raise RuntimeError(
             "FIREWORKS_API_KEY is not set. Copy from SummerRA/SED/.env or add to openrole/.env."
         )
-    if ingestion:
+    if fast:
+        model_name = settings.fireworks_model_fast
+    elif ingestion:
+        # JD parsing, people-finding context, fast extraction
         model_name = settings.fireworks_model_ingestion
+    elif research:
+        # Tavily/web synthesis, research agents, contact relevance
+        model_name = settings.fireworks_model_research
     elif writing:
+        # Outreach, resume, application drafts
         model_name = settings.fireworks_model_writing
     else:
+        # Draft evaluation, general reasoning
         model_name = settings.fireworks_model_default
     return _chat_openai_compatible(
         api_key=settings.fireworks_api_key,

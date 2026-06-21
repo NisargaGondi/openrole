@@ -65,6 +65,35 @@ def test_optimize_resume_for_job(mock_model, tmp_path, monkeypatch):
     assert "Kubernetes" in out["report"]["summary"]
 
 
+@patch("openrole.agents.resume_optimizer.get_chat_model")
+def test_optimize_resume_coerces_dict_ats_risks(mock_model, tmp_path, monkeypatch):
+    job_id = _seed_job_with_description(tmp_path, monkeypatch)
+    mock_llm = MagicMock()
+    mock_llm.invoke.return_value = MagicMock(
+        content="""
+        {
+          "match_score": 70,
+          "summary": "Decent fit.",
+          "strengths": [],
+          "gaps": [],
+          "missing_keywords": [],
+          "ats_risks": [
+            {"risk": "Critical Date Error", "detail": "May confuse ATS."},
+            {"risk": "Keyword Mismatch", "detail": "Missing JD terms."}
+          ],
+          "suggested_edits": []
+        }
+        """
+    )
+    mock_model.return_value = mock_llm
+
+    out = optimize_resume_for_job(job_id=job_id)
+    risks = out["report"]["ats_risks"]
+    assert len(risks) == 2
+    assert all(isinstance(r, str) for r in risks)
+    assert "Critical Date Error" in risks[0]
+
+
 @patch("openrole.agents.app_assistant.get_chat_model")
 def test_draft_application_answers(mock_model, tmp_path, monkeypatch):
     job_id = _seed_job_with_description(tmp_path, monkeypatch)

@@ -126,6 +126,81 @@ def _fetch_ashby(info: JobUrlInfo) -> ParsedJob:
     )
 
 
+def list_greenhouse_jobs(board_token: str) -> list[dict[str, Any]]:
+    """List all public postings on a Greenhouse board."""
+    url = f"https://boards-api.greenhouse.io/v1/boards/{board_token}/jobs?content=true"
+    data = _get_json(url)
+    jobs = data.get("jobs") or []
+    out: list[dict[str, Any]] = []
+    for item in jobs:
+        locs: list[str] = []
+        for loc in item.get("locations") or []:
+            if isinstance(loc, dict) and loc.get("name"):
+                locs.append(loc["name"])
+        content = item.get("content") or ""
+        out.append(
+            {
+                "id": item.get("id"),
+                "title": item.get("title") or "Unknown role",
+                "url": item.get("absolute_url"),
+                "content": _strip_html(str(content)),
+                "locations": list(dict.fromkeys(locs)),
+            }
+        )
+    return out
+
+
+def list_lever_jobs(company_slug: str) -> list[dict[str, Any]]:
+    """List all public Lever postings for a company."""
+    url = f"https://api.lever.co/v0/postings/{company_slug}?mode=json"
+    data = _get_json_or_list(url)
+    if not isinstance(data, list):
+        return []
+    out: list[dict[str, Any]] = []
+    for item in data:
+        categories = item.get("categories") or {}
+        locations: list[str] = []
+        if categories.get("location"):
+            locations.append(categories["location"])
+        if categories.get("allLocations"):
+            locations.extend(categories["allLocations"])
+        description = item.get("description") or item.get("descriptionPlain") or ""
+        out.append(
+            {
+                "id": item.get("id"),
+                "title": item.get("text") or item.get("title") or "Unknown role",
+                "url": item.get("hostedUrl"),
+                "description": _strip_html(str(description)),
+                "locations": list(dict.fromkeys(locations)),
+            }
+        )
+    return out
+
+
+def list_ashby_jobs(org_slug: str) -> list[dict[str, Any]]:
+    """List all public Ashby postings for an organization."""
+    url = f"https://api.ashbyhq.com/posting-api/job-board/{org_slug}"
+    data = _get_json(url)
+    jobs = data.get("jobs") or []
+    out: list[dict[str, Any]] = []
+    for item in jobs:
+        location = item.get("location") or item.get("locationName")
+        locations = [location] if location else []
+        if item.get("secondaryLocations"):
+            locations.extend(item["secondaryLocations"])
+        description = item.get("descriptionHtml") or item.get("descriptionPlain") or ""
+        out.append(
+            {
+                "id": item.get("id"),
+                "title": item.get("title") or "Unknown role",
+                "url": item.get("jobUrl"),
+                "description": _strip_html(str(description)),
+                "locations": list(dict.fromkeys(locations)),
+            }
+        )
+    return out
+
+
 def _get_json(url: str) -> dict[str, Any]:
     with httpx.Client(timeout=_HTTP_TIMEOUT, headers=_HEADERS, follow_redirects=True) as client:
         response = client.get(url)
@@ -134,6 +209,13 @@ def _get_json(url: str) -> dict[str, Any]:
     if not isinstance(data, dict):
         raise ValueError(f"Unexpected JSON from {url}")
     return data
+
+
+def _get_json_or_list(url: str) -> dict[str, Any] | list[Any]:
+    with httpx.Client(timeout=_HTTP_TIMEOUT, headers=_HEADERS, follow_redirects=True) as client:
+        response = client.get(url)
+        response.raise_for_status()
+        return response.json()
 
 
 def _strip_html(html: str) -> str:

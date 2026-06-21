@@ -8,6 +8,7 @@ from typing import Any
 
 from openrole.schemas.job import ParsedJob
 from openrole.scrapers.url_detect import JobPlatform
+from openrole.util.json_safe import json_safe_dict
 
 
 def is_available() -> bool:
@@ -87,37 +88,119 @@ def fetch_indeed_by_search(
     if not is_available():
         raise ImportError(jobspy_install_hint())
 
+    if indeed_job_id:
+        from openrole.scrapers.indeed_client import IndeedFetchError, fetch_indeed_by_job_key
+
+        try:
+            return fetch_indeed_by_job_key(indeed_job_id, source_url=source_url)
+        except IndeedFetchError:
+            pass
+
     from jobspy import scrape_jobs
 
-    search_term = " ".join(p for p in [title, company] if p) or "software engineer"
-    try:
-        df = scrape_jobs(
-            site_name=["indeed"],
-            search_term=search_term,
-            location=location or "United States",
-            results_wanted=15,
-            country_indeed="USA",
+    search_terms: list[str] = []
+    if title or company:
+        search_terms.append(" ".join(p for p in [title, company] if p))
+    if not search_terms:
+        search_terms.append("software engineer")
+
+    if source_url and not (title and company):
+        from openrole.db.repository import job_hints_for_url
+
+        hint_title, hint_company = job_hints_for_url(source_url)
+        if hint_title or hint_company:
+            hinted = " ".join(p for p in [hint_title, hint_company] if p)
+            if hinted not in search_terms:
+                search_terms.insert(0, hinted)
+
+    last_error: Exception | None = None
+    for search_term in search_terms:
+        try:
+            df = scrape_jobs(
+                site_name=["indeed"],
+                search_term=search_term,
+                location=location or "United States",
+                results_wanted=25,
+                country_indeed="USA",
+            )
+        except Exception as exc:
+            last_error = exc
+            continue
+        if df is None or df.empty:
+            continue
+
+        row = _match_row(
+            df,
+            job_id=indeed_job_id,
+            source_url=source_url,
+            url_columns=("job_url", "job_url_direct"),
         )
+        if row is None:
+            continue
+
+        resolved_url = source_url or _first_str(row, "job_url", "job_url_direct")
+        return _row_to_parsed_job(
+            row,
+            source_url=resolved_url,
+            platform=JobPlatform.INDEED.value,
+        )
+
+    if last_error:
+        raise ValueError(_format_jobspy_error(last_error, site="Indeed")) from last_error
+    raise ValueError(
+        f"Could not match Indeed job id={indeed_job_id or '?'}. "
+        "JobSpy search did not return this listing — try universal fetch or paste the description."
+    )
+
+
+def search_jobs(
+    *,
+    search_term: str,
+    location: str = "United States",
+    sites: tuple[str, ...] = ("indeed",),
+    results_wanted: int = 25,
+    fetch_descriptions: bool = True,
+) -> list[ParsedJob]:
+    """Bulk JobSpy search for the job scout (Indeed default; LinkedIn optional)."""
+    if not is_available():
+        raise ImportError(jobspy_install_hint())
+
+    from jobspy import scrape_jobs
+
+    site_list = [s for s in sites if s in ("indeed", "linkedin", "glassdoor")]
+    if not site_list:
+        site_list = ["indeed"]
+
+    kwargs: dict[str, Any] = {
+        "site_name": site_list,
+        "search_term": search_term,
+        "location": location,
+        "results_wanted": results_wanted,
+        "linkedin_fetch_description": fetch_descriptions,
+    }
+    if "indeed" in site_list:
+        kwargs["country_indeed"] = "USA"
+
+    try:
+        df = scrape_jobs(**kwargs)
     except Exception as exc:
-        raise ValueError(_format_jobspy_error(exc, site="Indeed")) from exc
+        raise ValueError(_format_jobspy_error(exc, site=",".join(site_list))) from exc
+
     if df is None or df.empty:
-        raise ValueError("No Indeed jobs returned from JobSpy for this search")
+        return []
 
-    row = _match_row(
-        df,
-        job_id=indeed_job_id,
-        source_url=source_url,
-        url_columns=("job_url", "job_url_direct"),
-    )
-    if row is None:
-        row = df.iloc[0]
-
-    resolved_url = source_url or _first_str(row, "job_url", "job_url_direct")
-    return _row_to_parsed_job(
-        row,
-        source_url=resolved_url,
-        platform=JobPlatform.INDEED.value,
-    )
+    out: list[ParsedJob] = []
+    seen_urls: set[str] = set()
+    for _, row in df.iterrows():
+        url = _first_str(row, "job_url", "job_url_direct", "link") or ""
+        if not url or url in seen_urls:
+            continue
+        seen_urls.add(url)
+        platform = JobPlatform.INDEED.value
+        if "linkedin.com" in url:
+            platform = JobPlatform.LINKEDIN.value
+        out.append(_row_to_parsed_job(row, source_url=url, platform=platform))
+    return out
 
 
 def probe_jobspy(*, site: str = "indeed") -> dict[str, Any]:
@@ -193,9 +276,9 @@ def _row_to_parsed_job(row: Any, *, source_url: str, platform: str = "linkedin")
         source_platform=platform,
         apply_url=source_url or None,
         external_id=_extract_id_from_url(source_url or ""),
-        raw_payload={
-            k: (None if str(v) == "nan" else v) for k, v in dict(row).items()
-        },
+        raw_payload=json_safe_dict(
+            {k: (None if str(v) == "nan" else v) for k, v in dict(row).items()}
+        ),
     )
 
 

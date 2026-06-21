@@ -69,13 +69,14 @@ def test_ingest_only_legacy(mock_ingest, tmp_path, monkeypatch):
     assert out["job_id"] == "j1"
 
 
-@patch("openrole.graph.nodes.outreach.draft_outreach_optimized")
-@patch("openrole.graph.nodes.outreach.research_contact_for_job")
-def test_pipeline_interrupts_at_outreach_review(mock_research, mock_draft, tmp_path, monkeypatch):
+@patch("openrole.graph.nodes.batch_outreach.draft_contacts_batch")
+@patch("openrole.graph.nodes.batch_outreach.research_contacts_batch")
+def test_pipeline_interrupts_at_outreach_review(mock_research, mock_drafts, tmp_path, monkeypatch):
     job_id, contact_id = _seed_job_with_contact(tmp_path, monkeypatch)
-    mock_research.return_value = {"status": "ok", "brief": {}}
-    mock_draft.return_value = {
-        "drafts": [{"id": "d1", "channel": "email"}],
+    mock_research.return_value = {"status": "ok", "researched": 1, "research_briefs": []}
+    mock_drafts.return_value = {
+        "status": "ok",
+        "drafts": [{"id": "d1", "channel": "email", "contact_id": contact_id}],
         "evaluation": {
             "acceptable": True,
             "grade": "good",

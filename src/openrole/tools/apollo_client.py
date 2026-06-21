@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from typing import Any
 
 import httpx
@@ -21,7 +22,8 @@ class ApolloNotConfiguredError(ApolloError):
 
 
 def is_configured() -> bool:
-    return bool(get_settings().apollo_api_key)
+    settings = get_settings()
+    return bool(settings.apollo_enabled and settings.apollo_api_key)
 
 
 def _api_key() -> str:
@@ -123,6 +125,64 @@ def match_person(*, apollo_id: str) -> dict[str, Any]:
     return person if isinstance(person, dict) else {}
 
 
+def find_person_by_name(
+    *,
+    domain: str,
+    full_name: str,
+    title: str | None = None,
+) -> dict[str, Any] | None:
+    """Search Apollo for a person at domain; return best name match or None."""
+    clean = _normalize_domain(domain)
+    if not clean or not full_name.strip():
+        return None
+
+    search_name = _normalize_name_for_match(full_name)
+    candidates = search_people(
+        domain=clean,
+        q_keywords=full_name.strip(),
+        per_page=15,
+    )
+    if not candidates:
+        candidates = search_people(domain=clean, per_page=25)
+
+    best: dict[str, Any] | None = None
+    best_score = 0.0
+    for person in candidates:
+        score = _name_match_score(search_name, _person_display_name(person))
+        if title and person.get("title"):
+            title_l = title.lower()
+            person_title = str(person.get("title")).lower()
+            if any(tok in person_title for tok in title_l.split() if len(tok) > 3):
+                score += 0.15
+        if score > best_score:
+            best_score = score
+            best = person
+
+    if best is None or best_score < 0.55:
+        return None
+    return best
+
+
+def _normalize_name_for_match(name: str) -> str:
+    cleaned = re.sub(r"\*+", "", name.lower())
+    cleaned = re.sub(r"[^a-z\s]", " ", cleaned)
+    return " ".join(cleaned.split())
+
+
+def _name_match_score(left: str, right: str) -> float:
+    l_parts = left.split()
+    r_parts = _normalize_name_for_match(right).split()
+    if not l_parts or not r_parts:
+        return 0.0
+    if left == _normalize_name_for_match(right):
+        return 1.0
+    if l_parts[0] == r_parts[0] and l_parts[-1][:3] == r_parts[-1][:3]:
+        return 0.85
+    if l_parts[0] == r_parts[0]:
+        return 0.6
+    return 0.0
+
+
 def probe_apollo(*, domain: str = "google.com") -> dict[str, Any]:
     """Connectivity test for Settings diagnostics."""
     if not is_configured():
@@ -180,4 +240,49 @@ def person_to_fields(person: dict[str, Any]) -> dict[str, Any]:
         "has_email": person.get("has_email"),
         "organization_name": org.get("name") if isinstance(org, dict) else None,
         "raw": person,
+    }
+
+
+def person_to_research_facts(person: dict[str, Any]) -> dict[str, Any]:
+    """Extract structured career/public facts from an Apollo person for research synthesis."""
+    org = person.get("organization") if isinstance(person.get("organization"), dict) else {}
+    employment: list[dict[str, Any]] = []
+    for row in person.get("employment_history") or []:
+        if not isinstance(row, dict):
+            continue
+        org_row = row.get("organization")
+        company_name = None
+        if isinstance(org_row, dict):
+            company_name = org_row.get("name")
+        elif isinstance(org_row, str):
+            company_name = org_row
+        employment.append(
+            {
+                "title": row.get("title"),
+                "company": company_name or row.get("organization_name"),
+                "start_date": row.get("start_date"),
+                "end_date": row.get("end_date"),
+                "current": row.get("current"),
+            }
+        )
+
+    loc_parts = [person.get("city"), person.get("state"), person.get("country")]
+    return {
+        "full_name": _person_display_name(person),
+        "headline": person.get("headline"),
+        "title": person.get("title"),
+        "seniority": person.get("seniority"),
+        "departments": person.get("departments") or [],
+        "functions": person.get("functions") or [],
+        "employment_history": employment[:6],
+        "organization": {
+            "name": org.get("name"),
+            "industry": org.get("industry"),
+            "estimated_num_employees": org.get("estimated_num_employees"),
+        },
+        "location": ", ".join(p for p in loc_parts if p) or None,
+        "linkedin_url": person.get("linkedin_url"),
+        "github_url": person.get("github_url"),
+        "twitter_url": person.get("twitter_url"),
+        "email": person.get("email"),
     }

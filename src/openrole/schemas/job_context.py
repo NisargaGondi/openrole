@@ -2,7 +2,15 @@
 
 from __future__ import annotations
 
+import re
+
 from pydantic import BaseModel, Field
+
+_DEPT_SYNONYMS: dict[str, list[str]] = {
+    "safeguard": ["safeguards", "safeguard", "ai safety", "ai safeguards", "safety"],
+    "machine learning": ["machine learning", "ml", "ai", "artificial intelligence"],
+    "sponsored products": ["sponsored products", "advertising", "ads"],
+}
 
 
 class JobSearchContext(BaseModel):
@@ -37,6 +45,31 @@ class JobSearchContext(BaseModel):
                 out.append(item.strip())
         return out[:6]
 
+    def expanded_department_queries(self) -> list[str]:
+        """Broader department tokens for Apollo title/keyword search."""
+        out: list[str] = []
+        for item in self.apollo_department_queries():
+            _add_unique(out, item)
+            lower = item.lower()
+            for key, synonyms in _DEPT_SYNONYMS.items():
+                if key in lower:
+                    for syn in synonyms:
+                        _add_unique(out, syn)
+            for token in re.split(r"[\s,/\-]+", item):
+                token = token.strip()
+                if len(token) > 3 and token.lower() not in {"labs", "team", "group", "department"}:
+                    _add_unique(out, token)
+        return out[:10]
+
+    def careershift_title_queries(self) -> list[str]:
+        """Single-keyword CareerShift title searches (one term per query)."""
+        queries: list[str] = []
+        for item in self.expanded_department_queries()[:5]:
+            _add_unique(queries, item)
+        if self.role_family:
+            _add_unique(queries, self.role_family)
+        return queries[:6]
+
     def summary(self) -> str:
         parts = []
         if self.office_locations:
@@ -46,3 +79,9 @@ class JobSearchContext(BaseModel):
         elif self.department_keywords:
             parts.append("Keywords: " + ", ".join(self.department_keywords[:4]))
         return " · ".join(parts) or "No context extracted"
+
+
+def _add_unique(out: list[str], item: str) -> None:
+    cleaned = item.strip()
+    if cleaned and cleaned.lower() not in {x.lower() for x in out}:
+        out.append(cleaned)

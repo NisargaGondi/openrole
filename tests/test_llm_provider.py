@@ -1,6 +1,8 @@
 """LLM provider routing tests."""
 
 import pytest
+
+import openrole.config as config_mod
 from openrole.config import get_settings
 
 
@@ -11,15 +13,26 @@ def _clear_settings_cache():
     get_settings.cache_clear()
 
 
-def test_auto_prefers_vertex_when_ready(monkeypatch):
+def test_auto_prefers_fireworks_when_both_configured(monkeypatch):
     monkeypatch.setenv("DATABASE_URL", "sqlite:///:memory:")
     monkeypatch.setenv("LLM_PROVIDER", "auto")
     monkeypatch.setenv("GCP_PROJECT_ID", "test-project")
     monkeypatch.setenv("GOOGLE_APPLICATION_CREDENTIALS", __file__)
     monkeypatch.setenv("FIREWORKS_API_KEY", "fw-key")
     monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
-    get_settings.cache_clear()
-    assert get_settings().resolved_llm_provider == "vertex"
+    config_mod.get_settings.cache_clear()
+    assert config_mod.get_settings().resolved_llm_provider == "fireworks"
+
+
+def test_auto_vertex_when_no_fireworks(monkeypatch):
+    monkeypatch.setenv("DATABASE_URL", "sqlite:///:memory:")
+    monkeypatch.setenv("LLM_PROVIDER", "auto")
+    monkeypatch.setenv("GCP_PROJECT_ID", "test-project")
+    monkeypatch.setenv("GOOGLE_APPLICATION_CREDENTIALS", __file__)
+    monkeypatch.setenv("FIREWORKS_API_KEY", "")
+    monkeypatch.setenv("OPENAI_API_KEY", "")
+    config_mod.get_settings.cache_clear()
+    assert config_mod.get_settings().resolved_llm_provider == "vertex"
 
 
 def test_auto_fireworks_when_no_vertex(monkeypatch):
@@ -56,7 +69,11 @@ def test_fireworks_model_names(monkeypatch):
     monkeypatch.setenv("DATABASE_URL", "sqlite:///:memory:")
     monkeypatch.setenv("LLM_PROVIDER", "fireworks")
     monkeypatch.setenv("FIREWORKS_API_KEY", "fw-key")
+    monkeypatch.setenv("FIREWORKS_MODEL_INGESTION", "accounts/fireworks/models/deepseek-v4-flash")
+    monkeypatch.setenv("FIREWORKS_MODEL_RESEARCH", "accounts/fireworks/models/kimi-k2p6")
     monkeypatch.setenv("FIREWORKS_MODEL_WRITING", "accounts/fireworks/models/deepseek-v4-pro")
     get_settings.cache_clear()
     s = get_settings()
+    assert "deepseek-v4-flash" in s.ingestion_model_name()
+    assert "kimi-k2p6" in s.research_model_name()
     assert "deepseek-v4-pro" in s.writing_model_name()

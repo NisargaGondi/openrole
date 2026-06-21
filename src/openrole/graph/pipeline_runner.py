@@ -42,6 +42,7 @@ def _initial_state(
         "draft_evaluations": [],
         "application_answers": [],
         "stages_completed": [],
+        "progress_log": [],
         "pipeline_options": (options or PipelineOptions()).to_state_dict(),
         "thread_id": tid,
         "run_id": rid,
@@ -202,6 +203,17 @@ def stream_and_run(
     )
 
 
+def _yield_stream_chunks(chunk) -> Iterator[tuple[str, dict[str, Any]]]:
+    if isinstance(chunk, tuple) and len(chunk) == 2:
+        _namespace, data = chunk
+        if isinstance(data, dict):
+            for node_name, update in data.items():
+                yield node_name, update if isinstance(update, dict) else {"_raw": update}
+    elif isinstance(chunk, dict):
+        for node_name, update in chunk.items():
+            yield node_name, update if isinstance(update, dict) else {"_raw": update}
+
+
 def stream_pipeline_updates(
     *,
     job_id: str | None = None,
@@ -220,15 +232,55 @@ def stream_pipeline_updates(
         thread_id=thread_id,
     )
     config = run_config(thread_id=initial["thread_id"])
+    yield "__meta__", {"thread_id": initial["thread_id"], "run_id": initial["run_id"]}
     for chunk in app.stream(initial, config=config, stream_mode="updates", subgraphs=True):
-        if isinstance(chunk, tuple) and len(chunk) == 2:
-            _namespace, data = chunk
-            if isinstance(data, dict):
-                for node_name, update in data.items():
-                    yield node_name, update if isinstance(update, dict) else {"_raw": update}
-        elif isinstance(chunk, dict):
-            for node_name, update in chunk.items():
-                yield node_name, update if isinstance(update, dict) else {"_raw": update}
+        yield from _yield_stream_chunks(chunk)
+
+
+def stream_pipeline_resume_updates(*, thread_id: str) -> Iterator[tuple[str, dict[str, Any]]]:
+    """Stream updates after resuming from an interrupt gate."""
+    app = get_pipeline_graph()
+    config = run_config(thread_id=thread_id)
+    for chunk in app.stream(Command(resume={"approved": True}), config=config, stream_mode="updates", subgraphs=True):
+        yield from _yield_stream_chunks(chunk)
+
+
+def stream_pipeline_until_done(
+    *,
+    job_id: str | None = None,
+    job_url: str | None = None,
+    job_text: str | None = None,
+    options: PipelineOptions | None = None,
+    thread_id: str | None = None,
+    auto_approve: bool = False,
+) -> Iterator[tuple[str, dict[str, Any]]]:
+    """Stream pipeline updates; optionally auto-resume past HITL review gates."""
+    tid = thread_id
+    for node_name, update in stream_pipeline_updates(
+        job_id=job_id,
+        job_url=job_url,
+        job_text=job_text,
+        options=options,
+        thread_id=thread_id,
+    ):
+        if node_name == "__meta__":
+            tid = update.get("thread_id") or tid
+        yield node_name, update
+
+    if not auto_approve or not tid:
+        return
+
+    while True:
+        snap = get_pipeline_state(tid)
+        if not snap.get("interrupts"):
+            break
+        act_log_msg = "Auto-continuing past review gate…"
+        yield "__log__", {"message": act_log_msg}
+        for node_name, update in stream_pipeline_resume_updates(thread_id=tid):
+            yield node_name, update
+        snap = get_pipeline_state(tid)
+        if not snap.get("interrupts"):
+            break
 
 
 def get_pipeline_state(thread_id: str) -> dict[str, Any]:

@@ -13,11 +13,26 @@ class PipelineOptions(BaseModel):
     run_outreach: bool = True
     run_resume: bool = True
     run_application: bool = False
+    include_careershift: bool = False
 
-    research_limit: int = Field(default=5, ge=1, le=15)
+    research_limit: int = Field(default=10, ge=1, le=15)
     max_draft_iterations: int = Field(default=3, ge=1, le=5)
     resume_label: str | None = None
+    resume_labels: list[str] | None = None
     application_questions: list[str] = Field(default_factory=list)
+    auto_approve: bool = False
+
+    @classmethod
+    def full_run(cls, *, include_resume: bool = True) -> PipelineOptions:
+        """People → research → outreach → optional resume, auto-continue past review gates."""
+        return cls(
+            run_people=True,
+            run_research=True,
+            run_outreach=True,
+            run_resume=include_resume,
+            run_application=False,
+            auto_approve=True,
+        )
 
     @classmethod
     def people_only(cls) -> PipelineOptions:

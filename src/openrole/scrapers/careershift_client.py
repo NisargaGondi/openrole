@@ -16,6 +16,9 @@ import sys
 from pathlib import Path
 from typing import Any
 
+from openrole.scrapers.email_utils import clean_email
+
+from openrole.scrapers.browser_headless import scrape_headless_enabled
 from openrole.scrapers.careershift_auth import (
     APP_LOGIN_URL,
     CMU_SIGNUP_URL,
@@ -29,6 +32,10 @@ PROFILE_DIR = Path.home() / ".openrole" / "careershift" / "profile"
 _CONTACTS_API_PATH = "/api/v2/contacts/search"
 _COMPANY_COMBO_INPUT = 'input[role="combobox"][data-active-item="true"]'
 _RESULT_CARD = '[class*="jobCard"][role="button"]'
+_EMAIL_ON_PAGE_RE = re.compile(r"[a-z0-9._%+-]+@[a-z0-9.-]+\.[a-z]{2,}", re.I)
+_DEFAULT_BATCH_TIMEOUT_S = 120.0
+_MAX_DETAIL_PER_QUERY = 8
+_MAX_EMAIL_WAIT_S = 1.5
 
 _PATCHRIGHT_HINT = (
     "Patchright Chromium is missing. Run once:\n"
@@ -73,10 +80,7 @@ def is_ready() -> bool:
 
 
 def _headless() -> bool:
-    env = os.environ.get("OPENROLE_CAREERSHIFT_HEADLESS")
-    if env is not None:
-        return env.lower() in ("1", "true", "yes")
-    return sys.platform != "darwin"
+    return scrape_headless_enabled("OPENROLE_CAREERSHIFT_HEADLESS", default=True)
 
 
 def search_contacts(
@@ -116,13 +120,105 @@ def search_contacts_batch(queries: list[dict[str, Any]]) -> list[dict[str, Any]]
         raise CareerShiftNotConfiguredError(_LOGIN_HINT)
 
     try:
-        return asyncio.run(_search_contacts_batch_async(queries))
+        timeout = _batch_timeout_s()
+        return _route_search_batch(queries)
+    except asyncio.TimeoutError as exc:
+        raise CareerShiftSearchError(
+            f"CareerShift search timed out after {int(timeout)}s. "
+            "Run fewer jobs at once, or raise OPENROLE_CAREERSHIFT_BATCH_TIMEOUT_S."
+        ) from exc
     except (CareerShiftSessionError, CareerShiftSearchError):
         raise
     except Exception as exc:
         raise CareerShiftSearchError(
             f"CareerShift browser automation failed: {type(exc).__name__}: {exc}"
         ) from exc
+
+
+def fetch_contact_email(
+    *,
+    company_name: str,
+    full_name: str,
+    title: str | None = None,
+) -> dict[str, Any]:
+    """Search CareerShift for one person and open the detail panel to reveal email."""
+    if not is_ready():
+        return {
+            "ok": False,
+            "error": "CareerShift not ready — run careershift_login.py from Settings sidebar.",
+        }
+
+    keywords = [full_name.strip()]
+    if title:
+        short = title.split(",")[0].strip()
+        if short and short.lower() not in full_name.lower():
+            keywords.append(short[:48])
+
+    try:
+        rows = search_contacts_batch(
+            [
+                {
+                    "company_name": company_name,
+                    "position_keywords": keywords,
+                    "max_results": 8,
+                    "force_detail": True,
+                    "max_detail": 1,
+                }
+            ]
+        )
+    except (CareerShiftNotConfiguredError, CareerShiftSessionError, CareerShiftSearchError) as exc:
+        return {"ok": False, "error": str(exc)}
+    except Exception as exc:
+        return {"ok": False, "error": f"{type(exc).__name__}: {exc}"}
+
+    match = _best_name_match(rows, full_name)
+    if match is None:
+        return {
+            "ok": False,
+            "error": f"No CareerShift match for {full_name!r} at {company_name}.",
+        }
+
+    fields = person_to_fields(match)
+    email = clean_email(fields.get("email"))
+    if not email:
+        return {
+            "ok": False,
+            "error": (
+                "CareerShift found a profile but no email "
+                "(daily detail-view limit or panel did not load)."
+            ),
+            "match": fields,
+        }
+
+    return {"ok": True, "email": email, "fields": fields, "raw": match}
+
+
+def _best_name_match(rows: list[dict[str, Any]], full_name: str) -> dict[str, Any] | None:
+    target = full_name.strip().lower()
+    if not target or not rows:
+        return None
+    target_parts = set(target.split())
+
+    best: dict[str, Any] | None = None
+    best_score = -1
+    for row in rows:
+        fields = person_to_fields(row)
+        name = (fields.get("full_name") or "").strip().lower()
+        if not name:
+            continue
+        if name == target:
+            return row
+        parts = set(name.split())
+        overlap = len(target_parts & parts)
+        score = overlap * 10
+        if target in name or name in target:
+            score += 5
+        if fields.get("email"):
+            score += 3
+        if score > best_score:
+            best_score = score
+            best = row
+    return best if best_score >= 10 else (rows[0] if rows else None)
 
 
 def probe_careershift(*, company_name: str = "Google") -> dict[str, Any]:
@@ -205,93 +301,64 @@ def to_ranking_person(contact: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _skip_detail_enrichment() -> bool:
+    raw = os.environ.get("OPENROLE_CAREERSHIFT_SKIP_DETAIL", "true").strip().lower()
+    return raw not in ("0", "false", "no")
+
+
+def _batch_timeout_s() -> float:
+    raw = os.environ.get("OPENROLE_CAREERSHIFT_BATCH_TIMEOUT_S", str(int(_DEFAULT_BATCH_TIMEOUT_S)))
+    try:
+        return max(30.0, float(raw))
+    except ValueError:
+        return _DEFAULT_BATCH_TIMEOUT_S
+
+
+class _BatchBudget:
+    """Hard cap so a single people-discovery run cannot hang for many minutes."""
+
+    def __init__(self, timeout_s: float) -> None:
+        self._deadline = asyncio.get_running_loop().time() + timeout_s
+
+    @property
+    def expired(self) -> bool:
+        return asyncio.get_running_loop().time() >= self._deadline
+
+
 async def _search_contacts_batch_async(queries: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    from patchright.async_api import async_playwright
+    from openrole.scrapers.careershift_session import CareerShiftBrowserSession
 
-    from openrole.scrapers.careershift_auth import session_is_ready
+    session = CareerShiftBrowserSession()
+    await session.start(headless=_headless())
+    try:
+        return await session.search_batch(queries)
+    finally:
+        await session.close()
 
-    PROFILE_DIR.mkdir(parents=True, exist_ok=True)
-    merged: list[dict[str, Any]] = []
-    seen: set[str] = set()
 
-    async with async_playwright() as playwright:
-        context = await playwright.chromium.launch_persistent_context(
-            str(PROFILE_DIR),
-            headless=_headless(),
-            viewport={"width": 1280, "height": 900},
-        )
+def _route_search_batch(queries: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    from openrole.scrapers.careershift_ipc import (
+        CareerShiftDaemonError,
+        CareerShiftDaemonUnavailable,
+        daemon_search_batch,
+        prefer_daemon,
+        require_daemon,
+    )
+
+    if prefer_daemon():
         try:
-            page = context.pages[0] if context.pages else await context.new_page()
-            captured: list[dict[str, Any]] = []
-            active_company: dict[str, str] = {"name": ""}
-
-            def _on_response(response) -> None:
-                if "careershift.com" not in response.url.lower():
-                    return
-                if response.request.resource_type not in ("xhr", "fetch"):
-                    return
-                ct = (response.headers.get("content-type") or "").lower()
-                if "json" not in ct:
-                    return
-                asyncio.create_task(
-                    _capture_json_response(
-                        response,
-                        captured,
-                        company_name=active_company["name"],
-                    )
-                )
-
-            page.on("response", _on_response)
-
-            await _reset_search_page(page)
-
-            if not await session_is_ready(page):
-                raise CareerShiftSessionError(
-                    "CareerShift session expired or not logged in. "
-                    "Re-login: python scripts/careershift_login.py --clear-profile --force"
-                )
-
-            for query_idx, query in enumerate(queries):
-                if query_idx > 0:
-                    await _reset_search_page(page)
-
-                captured.clear()
-                active_company["name"] = str(query["company_name"])
-                await _fill_contact_search(
-                    page,
-                    company_name=active_company["name"],
-                    school_name=query.get("school_name"),
-                )
-                await _wait_for_results(page, company_name=active_company["name"])
-
-                if await _page_has_no_results(page):
-                    continue
-
-                parsed = _dedupe_contacts(captured)
-                if not parsed:
-                    parsed = await _parse_results_from_dom(
-                        page, max_results=int(query.get("max_results") or 25)
-                    )
-
-                parsed = await _enrich_contacts_from_detail_panels(
-                    page,
-                    parsed,
-                    max_detail=min(int(query.get("max_results") or 25), 15),
-                )
-
-                max_results = int(query.get("max_results") or 25)
-                for row in parsed[:max_results]:
-                    person = to_ranking_person(row)
-                    pid = str(person.get("id") or "")
-                    if pid and pid in seen:
-                        continue
-                    if pid:
-                        seen.add(pid)
-                    merged.append(person)
-        finally:
-            await context.close()
-
-    return merged
+            return daemon_search_batch(queries)
+        except CareerShiftDaemonUnavailable:
+            if require_daemon():
+                raise CareerShiftSearchError(
+                    "CareerShift daemon required but not running. "
+                    "Start: bash scripts/run_careershift_daemon.sh"
+                ) from None
+        except CareerShiftDaemonError as exc:
+            raise CareerShiftSearchError(str(exc)) from exc
+    return asyncio.run(
+        asyncio.wait_for(_search_contacts_batch_async(queries), timeout=_batch_timeout_s() + 15)
+    )
 
 
 async def _search_contacts_async(
@@ -342,6 +409,12 @@ async def _capture_json_response(
                 sink.append(_normalize_api_contact(row))
         return
 
+    if "/contacts/" in url and isinstance(data, dict):
+        row = _normalize_api_contact(data)
+        if row.get("email") or row.get("has_email"):
+            sink.append(row)
+        return
+
     for row in _extract_contacts_from_json(data):
         sink.append(row)
 
@@ -354,12 +427,7 @@ async def _fill_contact_search(
     location: str | None = None,
     position_keywords: list[str] | None = None,
 ) -> None:
-    """Fill contacts search — company (+ optional school) only.
-
-    Location/title filters are applied in OpenRole ranking, not CareerShift UI.
-    Combining many job titles in CareerShift often returns zero results.
-    """
-    _ = location, position_keywords
+    """Fill contacts search — company, optional school, optional title keyword."""
     await _ensure_contacts_search_ready(page)
     await _clear_search_fields(page)
 
@@ -369,6 +437,27 @@ async def _fill_contact_search(
             await _type_into_field(school, school_name)
 
     await _fill_company_combobox(page, company_name)
+
+    if position_keywords:
+        await _enable_advanced_search(page)
+        title_value = position_keywords[0]
+        for pattern in (
+            re.compile(r"job title", re.I),
+            re.compile(r"position", re.I),
+            re.compile(r"title", re.I),
+        ):
+            if await _fill_by_placeholder(page, pattern, title_value):
+                break
+
+    if location:
+        await _enable_advanced_search(page)
+        for pattern in (
+            re.compile(r"location", re.I),
+            re.compile(r"city", re.I),
+        ):
+            if await _fill_by_placeholder(page, pattern, location):
+                break
+
     await _click_search(page)
 
 
@@ -420,12 +509,26 @@ async def _locate_company_trigger(page):
 
 
 async def _reset_search_page(page) -> None:
-    await page.goto(CONTACTS_SEARCH_URL, wait_until="domcontentloaded", timeout=60_000)
+    await page.goto(CONTACTS_SEARCH_URL, wait_until="domcontentloaded", timeout=30_000)
     try:
-        await page.wait_for_load_state("networkidle", timeout=20_000)
+        await page.wait_for_load_state("load", timeout=8_000)
     except Exception:
         pass
     await _ensure_contacts_search_ready(page)
+
+
+async def _soft_reset_between_queries(page) -> None:
+    """Clear filters without a full navigation — much faster between batch queries."""
+    if CONTACTS_SEARCH_URL.split("/")[-1] not in page.url:
+        await _reset_search_page(page)
+        return
+    await _ensure_contacts_search_ready(page)
+    await _clear_search_fields(page)
+    try:
+        await page.keyboard.press("Escape")
+    except Exception:
+        pass
+    await asyncio.sleep(0.2)
 
 
 async def _select_company_option(page, company_name: str) -> None:
@@ -467,69 +570,139 @@ async def _enrich_contacts_from_detail_panels(
     page,
     contacts: list[dict[str, Any]],
     *,
-    max_detail: int = 12,
+    max_detail: int = _MAX_DETAIL_PER_QUERY,
+    budget: _BatchBudget | None = None,
 ) -> list[dict[str, Any]]:
-    """Click result cards and View contact details to unblur email/phone/location."""
+    """Open top result cards and click View Contact Details to reveal email."""
     if not contacts:
         return contacts
 
+    enriched = list(contacts)
     cards = page.locator(_RESULT_CARD)
     card_count = await cards.count()
-    enriched = list(contacts)
-    seen_names = {c.get("full_name", "").lower() for c in enriched}
+    limit = min(card_count, max_detail, _MAX_DETAIL_PER_QUERY)
 
-    for idx in range(min(card_count, max_detail)):
+    for idx in range(limit):
+        if budget and budget.expired:
+            break
         try:
-            await cards.nth(idx).click(timeout=5_000)
-            await asyncio.sleep(0.45)
-            for pattern in (
-                re.compile(r"view contact details", re.I),
-                re.compile(r"contact details", re.I),
-                re.compile(r"view details", re.I),
-            ):
-                btn = page.get_by_role("button", name=pattern)
-                if await btn.count() > 0:
-                    await btn.first.click(timeout=5_000)
-                    await asyncio.sleep(0.55)
-                    break
-
-            detail = await _read_contact_detail_panel(page)
+            await cards.nth(idx).click(timeout=4_000)
+            await asyncio.sleep(0.35)
+            await _reveal_contact_details(page)
+            detail = await _read_contact_detail_panel(page, already_revealed=True)
             if not detail:
                 continue
-
-            name_key = (detail.get("full_name") or "").lower()
-            target = None
-            for c in enriched:
-                if c.get("full_name", "").lower() == name_key:
-                    target = c
-                    break
-            if target is None and idx < len(enriched):
-                target = enriched[idx]
-
+            target = _match_contact_row(enriched, detail, idx)
             if target is None:
                 continue
-
-            for key in ("email", "location", "title", "phone", "mobile"):
-                val = detail.get(key)
-                if val and not target.get(key if key != "mobile" else "phone"):
-                    target[key if key != "mobile" else "phone"] = val
-            if target.get("email"):
-                target["has_email"] = True
-            target["detail_panel_fetched"] = True
-
-            for close_pattern in (
-                re.compile(r"^close$", re.I),
-                re.compile(r"back to results", re.I),
-            ):
-                close_btn = page.get_by_role("button", name=close_pattern)
-                if await close_btn.count() > 0:
-                    await close_btn.first.click(timeout=3_000)
-                    await asyncio.sleep(0.3)
-                    break
+            _merge_detail_into_contact(target, detail)
         except Exception:
             continue
 
     return enriched
+
+
+def _match_contact_row(
+    enriched: list[dict[str, Any]],
+    detail: dict[str, Any],
+    card_index: int,
+) -> dict[str, Any] | None:
+    name_key = (detail.get("full_name") or "").lower()
+    for row in enriched:
+        if row.get("full_name", "").lower() == name_key:
+            return row
+    if card_index < len(enriched):
+        return enriched[card_index]
+    return None
+
+
+def _merge_detail_into_contact(target: dict[str, Any], detail: dict[str, Any]) -> None:
+    for key in ("email", "location", "title", "phone", "mobile"):
+        val = detail.get(key)
+        if key == "email":
+            val = clean_email(val)
+        field = "phone" if key == "mobile" else key
+        if val and not target.get(field):
+            target[field] = val
+    target["has_email"] = bool(clean_email(target.get("email")))
+    target["detail_panel_fetched"] = True
+
+
+async def _reveal_contact_details(page) -> bool:
+    """Click visible 'View Contact Details' links (CareerShift uses <a>, not buttons)."""
+    clicked_any = False
+    for locator in (
+        page.get_by_role("link", name=re.compile(r"view contact details", re.I)),
+        page.locator('a:has-text("View Contact Details")'),
+    ):
+        try:
+            count = min(await locator.count(), 2)
+        except Exception:
+            count = 0
+        for idx in range(count):
+            try:
+                item = locator.nth(idx)
+                if not await item.is_visible():
+                    continue
+                await item.click(timeout=3_000)
+                clicked_any = True
+                await asyncio.sleep(0.4)
+            except Exception:
+                continue
+    return clicked_any
+
+
+async def _wait_for_real_email(page, *, timeout_s: float = _MAX_EMAIL_WAIT_S) -> str | None:
+    deadline = asyncio.get_running_loop().time() + timeout_s
+    while asyncio.get_running_loop().time() < deadline:
+        email = await _extract_email_from_page(page)
+        if email:
+            return email
+        await asyncio.sleep(0.35)
+    return None
+
+
+async def _extract_email_from_page(page) -> str | None:
+    try:
+        mailto = page.locator('a[href^="mailto:"]').first
+        if await mailto.count() > 0:
+            href = await mailto.get_attribute("href") or ""
+            raw = href.replace("mailto:", "").split("?")[0].strip()
+            email = clean_email(raw)
+            if email:
+                return email
+    except Exception:
+        pass
+
+    for selector in (
+        'tr:has-text("Email") td >> nth=1',
+        '[data-testid*="email" i]',
+        '[class*="email" i]',
+    ):
+        try:
+            loc = page.locator(selector).first
+            if await loc.count() == 0:
+                continue
+            text = (await loc.inner_text()).strip()
+            email = clean_email(text)
+            if email:
+                return email
+        except Exception:
+            continue
+
+    try:
+        body = await page.locator("main").inner_text()
+    except Exception:
+        return None
+    return _scan_text_for_email(body)
+
+
+def _scan_text_for_email(text: str) -> str | None:
+    for match in _EMAIL_ON_PAGE_RE.finditer(text or ""):
+        email = clean_email(match.group())
+        if email and not email.endswith("@careershift.com"):
+            return email
+    return None
 
 
 async def _ensure_contacts_search_ready(page) -> None:
@@ -668,12 +841,12 @@ async def _click_search(page) -> None:
     try:
         async with page.expect_response(
             lambda r: _CONTACTS_API_PATH in r.url.lower() and r.status < 400,
-            timeout=20_000,
+            timeout=12_000,
         ):
-            await btn.click(timeout=8_000)
+            await btn.click(timeout=6_000)
     except Exception:
-        await btn.click(timeout=8_000)
-        await asyncio.sleep(1.5)
+        await btn.click(timeout=6_000)
+        await asyncio.sleep(0.8)
 
 
 async def _page_has_no_results(page) -> bool:
@@ -683,7 +856,7 @@ async def _page_has_no_results(page) -> bool:
         return False
 
 
-async def _wait_for_results(page, *, company_name: str, timeout_ms: int = 20_000) -> None:
+async def _wait_for_results(page, *, company_name: str, timeout_ms: int = 12_000) -> None:
     """Wait until CareerShift shows results OR an explicit empty state."""
     _ = company_name
     terminal = page.get_by_text(re.compile(r"Contacts Found|No Contacts Found", re.I))
@@ -742,9 +915,7 @@ def _normalize_api_contact(row: dict[str, Any]) -> dict[str, Any]:
     location = row.get("location") or ", ".join(str(p) for p in loc_parts if p) or None
     cs_id = row.get("externalId") or row.get("lookupKey") or row.get("id")
     full = (row.get("name") or f"{row.get('firstName', '')} {row.get('lastName', '')}").strip()
-    email = row.get("email")
-    if isinstance(email, str) and email.lower() == "email@example.com":
-        email = None
+    email = clean_email(row.get("email"))
     company = row.get("companyName") or row.get("company")
     if isinstance(company, dict):
         company = company.get("companyName")
@@ -761,8 +932,17 @@ def _normalize_api_contact(row: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-async def _read_contact_detail_panel(page) -> dict[str, Any] | None:
-    email = await _read_label_value(page, "Email")
+async def _read_contact_detail_panel(
+    page,
+    *,
+    already_revealed: bool = False,
+) -> dict[str, Any] | None:
+    if not already_revealed:
+        await _reveal_contact_details(page)
+    email = await _wait_for_real_email(page, timeout_s=_MAX_EMAIL_WAIT_S)
+    if not email:
+        email = clean_email(await _read_label_value(page, "Email"))
+
     location = await _read_label_value(page, "Location")
     title = await _read_label_value(page, "Title") or await _read_label_value(page, "Job Title")
     phone = await _read_label_value(page, "Mobile") or await _read_label_value(page, "Phone")

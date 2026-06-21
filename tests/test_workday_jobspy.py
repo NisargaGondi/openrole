@@ -25,7 +25,8 @@ def test_detect_workday():
 
 
 @patch("openrole.scrapers.workday.httpx.Client")
-def test_workday_ingest(mock_client_cls, monkeypatch):
+@patch("openrole.agents.job_ingestion.enrich_parsed_job_with_llm")
+def test_workday_ingest(mock_enrich, mock_client_cls, monkeypatch):
     monkeypatch.setenv("DATABASE_URL", "sqlite:///:memory:")
     import openrole.db.session as db_session
     from openrole.config import get_settings
@@ -37,6 +38,11 @@ def test_workday_ingest(mock_client_cls, monkeypatch):
     from openrole.db.session import init_db
 
     init_db()
+
+    def _passthrough(parsed, **kwargs):
+        return parsed, []
+
+    mock_enrich.side_effect = _passthrough
 
     mock_response = mock_client_cls.return_value.__enter__.return_value.get.return_value
     mock_response.status_code = 200

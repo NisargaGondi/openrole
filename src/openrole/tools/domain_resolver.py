@@ -50,6 +50,10 @@ def resolve_company_domain(
         if _is_plausible_domain(clean):
             return DomainResolution(clean, "provided", "confirmed")
 
+    db_domain = _resolve_from_db(company_name)
+    if db_domain:
+        return DomainResolution(db_domain, "database", "confirmed")
+
     for candidate in _candidates_from_url(source_url):
         if _is_plausible_domain(candidate):
             return DomainResolution(candidate, "source_url", "inferred")
@@ -66,6 +70,11 @@ def resolve_company_domain(
                 if _is_plausible_domain(d):
                     return DomainResolution(d, f"payload.{key}", "inferred")
 
+    if len(re.sub(r"[^a-z0-9]+", "", company_name.lower())) >= 3:
+        llm_domain = _resolve_via_llm(company_name, source_url=source_url, description=description)
+        if llm_domain:
+            return DomainResolution(llm_domain, "llm", "inferred")
+
     apollo_domain = _resolve_via_apollo(company_name)
     if apollo_domain:
         return DomainResolution(apollo_domain, "apollo", "inferred")
@@ -73,10 +82,6 @@ def resolve_company_domain(
     web_domain = _resolve_via_web(company_name)
     if web_domain:
         return DomainResolution(web_domain, "tavily", "inferred")
-
-    llm_domain = _resolve_via_llm(company_name, source_url=source_url, description=description)
-    if llm_domain:
-        return DomainResolution(llm_domain, "llm", "inferred")
 
     guessed = _guess_from_company_name(company_name)
     if guessed:
@@ -101,7 +106,7 @@ def enrich_parsed_job_domain(parsed) -> tuple[Any, list[str]]:
     if resolution is None:
         warnings.append(
             f"Could not resolve email domain for {parsed.company_name}. "
-            "Add domain manually on the Saved jobs page before Find people."
+            "Set company domain in Settings or ensure Apollo/Tavily/LLM keys are configured."
         )
         return parsed, warnings
 
@@ -122,6 +127,29 @@ def enrich_parsed_job_domain(parsed) -> tuple[Any, list[str]]:
             f"Inferred company domain `{resolution.domain}` via {resolution.source}."
         )
     return parsed, warnings
+
+
+def _resolve_from_db(company_name: str) -> str | None:
+    """Reuse domain from a company already in SQLite (e.g. scout_targets seed)."""
+    if not company_name.strip():
+        return None
+    try:
+        from sqlalchemy import select
+
+        from openrole.db.models import Company
+        from openrole.db.session import session_scope
+
+        with session_scope() as session:
+            company = session.scalar(
+                select(Company).where(Company.name == company_name.strip()).limit(1)
+            )
+            if company and company.domain:
+                domain = apollo_client.normalize_domain(str(company.domain))
+                if _is_plausible_domain(domain):
+                    return domain
+    except Exception:
+        return None
+    return None
 
 
 def _resolve_via_apollo(company_name: str) -> str | None:

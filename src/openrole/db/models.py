@@ -24,10 +24,37 @@ class JobStatus(str, enum.Enum):
     DISCOVERED = "discovered"
     REVIEWING = "reviewing"
     APPLIED = "applied"
+    ASSESSMENT = "assessment"
     INTERVIEWING = "interviewing"
+    WAITLIST = "waitlist"
     OFFER = "offer"
     REJECTED = "rejected"
     ARCHIVED = "archived"
+
+
+JOB_STATUS_LABELS: dict[str, str] = {
+    JobStatus.DISCOVERED.value: "Discovered",
+    JobStatus.REVIEWING.value: "Researching",
+    JobStatus.APPLIED.value: "Applied",
+    JobStatus.ASSESSMENT.value: "Assessment",
+    JobStatus.INTERVIEWING.value: "Interview",
+    JobStatus.WAITLIST.value: "Waitlist",
+    JobStatus.OFFER.value: "Offer",
+    JobStatus.REJECTED.value: "Rejected",
+    JobStatus.ARCHIVED.value: "Archived",
+}
+
+TRACKER_STATUS_ORDER: tuple[str, ...] = (
+    JobStatus.DISCOVERED.value,
+    JobStatus.REVIEWING.value,
+    JobStatus.APPLIED.value,
+    JobStatus.ASSESSMENT.value,
+    JobStatus.INTERVIEWING.value,
+    JobStatus.WAITLIST.value,
+    JobStatus.OFFER.value,
+    JobStatus.REJECTED.value,
+    JobStatus.ARCHIVED.value,
+)
 
 
 class OutreachStatus(str, enum.Enum):
@@ -157,3 +184,17 @@ class Application(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
     job: Mapped[Job] = relationship(back_populates="applications")
+
+
+class UsageEvent(Base):
+    __tablename__ = "usage_events"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_uuid)
+    job_id: Mapped[str | None] = mapped_column(String(36), index=True)
+    company: Mapped[str | None] = mapped_column(String(255))
+    pipeline_step: Mapped[str | None] = mapped_column(String(64))
+    service: Mapped[str] = mapped_column(String(64), index=True)
+    calls: Mapped[int] = mapped_column(default=1)
+    est_cost_usd: Mapped[float] = mapped_column(default=0.0)
+    detail: Mapped[str | None] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())

@@ -31,6 +31,8 @@ def load_candidate_profile(*, fetch_links: bool = True) -> dict[str, Any]:
         "website_url": settings.candidate_website_url,
         "graduation": settings.candidate_graduation,
         "role_search": settings.candidate_role_search,
+        "visa_status": settings.candidate_visa_status,
+        "target_families": list(settings.scout_target_families_set()),
         "resumes": [],
         "warnings": [],
     }
@@ -47,6 +49,14 @@ def load_candidate_profile(*, fetch_links: bool = True) -> dict[str, Any]:
             profile["warnings"].append(f"Could not read resume: {path}")
 
     if fetch_links:
+        if settings.candidate_linkedin_url:
+            li = _fetch_linkedin_summary(settings.candidate_linkedin_url)
+            if li:
+                profile["linkedin_summary"] = li
+            else:
+                profile["warnings"].append(
+                    "LinkedIn profile fetch skipped (set TAVILY_API_KEY for extract, or paste details in resume)"
+                )
         if settings.candidate_github_url:
             gh = _fetch_github_summary(settings.candidate_github_url)
             if gh:
@@ -105,6 +115,8 @@ def _build_prompt_context(profile: dict[str, Any]) -> str:
         parts.append("Additional notes:\n" + profile["profile_notes"])
     if profile.get("github_summary"):
         parts.append("GitHub (public API):\n" + profile["github_summary"][:2500])
+    if profile.get("linkedin_summary"):
+        parts.append("LinkedIn (public excerpt):\n" + profile["linkedin_summary"][:2500])
     if profile.get("website_summary"):
         parts.append("Personal site excerpt:\n" + profile["website_summary"][:2500])
     for idx, resume in enumerate(profile.get("resumes") or [], start=1):
@@ -184,6 +196,25 @@ def _fetch_github_summary(url: str) -> str | None:
             desc = (repo.get("description") or "")[:120]
             lines.append(f"Repo: {repo.get('name')} — {desc}")
     return "\n".join(lines)
+
+
+def _fetch_linkedin_summary(url: str) -> str | None:
+    """Public LinkedIn page excerpt via Tavily Extract (requires TAVILY_API_KEY)."""
+    from openrole.tools.web_search import extract_url, is_configured
+
+    if not is_configured():
+        return None
+    result = extract_url(
+        url,
+        extract_depth="basic",
+        query="headline experience skills projects education",
+    )
+    if not result:
+        return None
+    raw = str(result.get("raw_content") or "").strip()
+    if len(raw) < 40:
+        return None
+    return raw[:_MAX_WEB_CHARS]
 
 
 def _fetch_website_text(url: str) -> str | None:

@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from sqlalchemy import select
 
+from openrole.agents.pipeline_progress import progress_entry, stamp
+from openrole.api.activity_store import log as act_log
 from openrole.agents.people_discovery import (
     PeopleDiscoveryError,
     extract_context_for_job,
@@ -12,6 +14,8 @@ from openrole.agents.people_discovery import (
     rank_people_candidates,
     validate_and_finalize_contacts,
 )
+from openrole.agents.person_research import dedupe_contacts_for_research
+from openrole.config import get_settings
 from openrole.db.models import Job
 from openrole.db.repository import list_contacts_for_job, save_discovered_contacts
 from openrole.db.session import session_scope
@@ -33,6 +37,7 @@ def extract_context_node(state: OpenRoleState) -> dict:
             "pipeline_stage": "context_extracted",
             "stages_completed": ["extract_context"],
             "warnings": warnings,
+            **progress_entry("Extracted job department + location context"),
         }
     except PeopleDiscoveryError as exc:
         return {"errors": [str(exc)]}
@@ -47,9 +52,29 @@ def discover_candidates_node(state: OpenRoleState) -> dict:
     try:
         ctx = JobSearchContext.model_validate(raw_ctx)
         loc = location_target_from_dict(raw_loc)
-        candidates, domain, company_name, source_warnings = rank_people_candidates(
-            job_id, search_context=ctx, location_target=loc
+        opts = PipelineOptions.from_state(state.get("pipeline_options"))
+        settings = get_settings()
+        include_cs = opts.include_careershift or settings.careershift_people_pipeline
+        source_label = "Tavily + CareerShift" if include_cs and not settings.apollo_enabled else (
+            "Tavily + CareerShift + Apollo" if include_cs and settings.apollo_enabled
+            else "Tavily + Apollo" if settings.apollo_enabled
+            else "Tavily"
         )
+        progress_lines: list[str] = [stamp(f"Discovering people ({source_label})")]
+        from openrole.scrapers.daemon_manager import managed_daemons
+
+        daemon_names: list[str] = []
+        if include_cs:
+            daemon_names.append("careershift")
+        with managed_daemons(*daemon_names):
+            candidates, domain, company_name, source_warnings = rank_people_candidates(
+                job_id,
+                search_context=ctx,
+                location_target=loc,
+                include_careershift=include_cs,
+                on_progress=progress_lines.append,
+            )
+        progress_lines.append(stamp(f"Discovery complete — {len(candidates)} ranked candidate(s)"))
         return {
             "contact_candidates": [c.model_dump(mode="json") for c in candidates],
             "company_domain": domain,
@@ -57,6 +82,7 @@ def discover_candidates_node(state: OpenRoleState) -> dict:
             "pipeline_stage": "candidates_ranked",
             "stages_completed": ["discover_candidates"],
             "warnings": source_warnings,
+            "progress_log": progress_lines,
         }
     except PeopleDiscoveryError as exc:
         return {"errors": [str(exc)]}
@@ -66,25 +92,45 @@ def validate_contacts_node(state: OpenRoleState) -> dict:
     raw_candidates = state.get("contact_candidates") or []
     raw_ctx = state.get("search_context")
     raw_loc = state.get("location_target")
-    domain = state.get("company_domain")
-    if not raw_ctx or not raw_loc or not domain:
+    domain = state.get("company_domain") or ""
+    if not raw_ctx or not raw_loc:
         return {"errors": ["Missing context for validation"]}
     if not raw_candidates:
         return {
             "contacts": [],
-            "errors": ["Apollo and/or CareerShift returned no candidates for this job"],
+            "errors": ["Tavily and/or CareerShift returned no candidates for this job"],
             "pipeline_stage": "validate_empty",
+            **progress_entry("Validation skipped — no candidates"),
         }
 
     ctx = JobSearchContext.model_validate(raw_ctx)
     loc = location_target_from_dict(raw_loc)
     candidates = [DiscoveredContact.model_validate(c) for c in raw_candidates]
+    job = None
+    company_name = (state.get("company") or {}).get("name")
+    job_id = state.get("job_id")
+    if job_id:
+        with session_scope() as session:
+            job = session.scalar(select(Job).where(Job.id == job_id).limit(1))
+    progress = [stamp(f"Validating {len(candidates)} candidate(s) (location + department)")]
+    act_log(progress[0], icon="dot")
+
+    def _on_progress(msg: str) -> None:
+        progress.append(msg)
+        act_log(msg, icon="dot")
+
     final, validation, val_warnings = validate_and_finalize_contacts(
         candidates,
         search_context=ctx,
         location_target=loc,
         company_domain=domain,
+        job=job,
+        company_name=company_name,
+        apollo_enrich_limit=0,
+        guess_emails=True,
+        on_progress=_on_progress,
     )
+    progress.append(stamp(f"Validation complete — {len(final)} contact(s) passed filters"))
     errors: list[str] = []
     if not final:
         errors.append(
@@ -98,6 +144,8 @@ def validate_contacts_node(state: OpenRoleState) -> dict:
         "stages_completed": ["validate_contacts"],
         "warnings": val_warnings,
         "errors": errors,
+        "progress_log": progress,
+        "_live_progress": True,
     }
 
 
@@ -105,7 +153,11 @@ def persist_contacts_node(state: OpenRoleState) -> dict:
     job_id = state.get("job_id")
     raw = state.get("contacts") or []
     if not job_id or not raw:
-        return {"contact_count": 0, "pipeline_stage": "persist_skipped"}
+        return {
+            "contact_count": 0,
+            "pipeline_stage": "persist_skipped",
+            **progress_entry("Persist skipped — no contacts to save"),
+        }
 
     contacts = [DiscoveredContact.model_validate(c) for c in raw]
     with session_scope() as session:
@@ -136,6 +188,7 @@ def persist_contacts_node(state: OpenRoleState) -> dict:
         ],
         "pipeline_stage": "contacts_persisted",
         "stages_completed": ["persist_contacts"],
+        **progress_entry(f"Saved {len(saved)} contact(s) to database"),
     }
 
 
@@ -150,10 +203,12 @@ def prepare_outreach_node(state: OpenRoleState) -> dict:
         job = session.scalar(select(Job).where(Job.id == job_id).limit(1))
         if job is None or not job.company_id:
             return {"errors": ["Job not found for outreach prep"]}
-        contacts = list_contacts_for_job(
-            session,
-            company_id=job.company_id,
-            source_job_id=job_id,
+        contacts = dedupe_contacts_for_research(
+            list_contacts_for_job(
+                session,
+                company_id=job.company_id,
+                source_job_id=job_id,
+            )[: opts.research_limit * 2]
         )[: opts.research_limit]
 
     if not contacts:

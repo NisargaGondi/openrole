@@ -50,6 +50,7 @@ class OpenRoleState(TypedDict, total=False):
     # Progress
     pipeline_stage: Annotated[str | None, _merge_stage]
     stages_completed: Annotated[list[str], operator.add]
+    progress_log: Annotated[list[str], operator.add]
 
     warnings: Annotated[list[str], operator.add]
     errors: Annotated[list[str], operator.add]

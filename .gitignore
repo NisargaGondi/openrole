@@ -36,6 +36,8 @@ htmlcov/
 
 # Logs and local data
 *.log
+*.pid
+streamlit.pid
 data/*
 !data/.gitkeep
 *.db

@@ -8,18 +8,29 @@ from typing import Any
 
 from sqlalchemy import select
 
-from openrole.agents.contact_validation import build_location_target, validate_contacts
+from openrole.agents.pipeline_progress import ProgressCallback, stamp
+from openrole.agents.tavily_people_discovery import discover_people_via_tavily, normalize_company_search_name
+from openrole.tools.web_search import is_configured as tavily_is_configured
+from openrole.agents.contact_quota import (
+    MIN_CONTACTS,
+    select_contacts_by_quota,
+    tier_quota_counts,
+)
+from openrole.agents.contact_relevance import score_contacts_with_llm
+from openrole.agents.email_guesser import guess_emails_with_llm
+from openrole.agents.contact_validation import build_location_target, validate_contacts, backfill_location_contacts
 from openrole.agents.job_context import build_job_search_context
+from openrole.agents.outreach_prompts import is_leadership_tier
 from openrole.config import get_settings
 from openrole.db.models import Company, Contact, Job
 from openrole.db.repository import save_discovered_contacts
 from openrole.db.session import session_scope
 from openrole.schemas.contact import ContactTier, DiscoveredContact, compute_discovery_source
 from openrole.schemas.job_context import JobSearchContext
+from openrole.scrapers.email_utils import clean_email
 from openrole.scrapers.location_match import (
     JobLocationTarget,
     email_actionable,
-    parse_job_locations,
     person_matches_department,
     score_person_location,
 )
@@ -28,9 +39,8 @@ from openrole.scrapers.careershift_validate import merge_validated_fields, valid
 from openrole.tools import apollo_client
 from openrole.tools.domain_resolver import resolve_company_domain
 
-_MAX_CONTACTS = 15
-_ENRICH_LIMIT = 12
-_EXCLUDE_RELEVANCE_BELOW = 20
+_MAX_CONTACTS = 20
+_EXCLUDE_RELEVANCE_BELOW = 45
 
 _SEARCH_PASSES: list[tuple[str, list[str]]] = [
     ("managers", ["hiring manager", "engineering manager", "director", "head of"]),
@@ -73,7 +83,10 @@ def extract_context_for_job(job_id: str) -> tuple[JobSearchContext, JobLocationT
         if not ctx.apollo_department_queries():
             warnings.append("No department/team extracted — people search may be broader.")
         else:
-            warnings.append(f"Department filter: {', '.join(ctx.apollo_department_queries()[:4])}")
+            expanded = ctx.expanded_department_queries()
+            warnings.append(
+                f"Department filter: {', '.join(expanded[:5])}"
+            )
         if loc.strict_cities:
             warnings.append(
                 "City-strict mode: " + ", ".join(c.title() for c in loc.city_tokens)
@@ -86,8 +99,18 @@ def rank_people_candidates(
     *,
     search_context: JobSearchContext,
     location_target: JobLocationTarget,
+    include_careershift: bool = False,
+    on_progress: ProgressCallback | None = None,
 ) -> tuple[list[DiscoveredContact], str, str, list[str]]:
-    """LangGraph node: Apollo + CareerShift search + ranking (no persist)."""
+    """LangGraph node: Tavily + Apollo search + ranking (no persist)."""
+
+    def _log(msg: str) -> None:
+        from openrole.api.pipeline_cancel import check_cancelled
+
+        check_cancelled()
+        if on_progress:
+            on_progress(stamp(msg))
+
     extra_warnings: list[str] = []
     with session_scope() as session:
         job = _load_job(session, job_id)
@@ -108,41 +131,75 @@ def rank_people_candidates(
                 extra_warnings.append(
                     f"Resolved company domain `{domain}` via {resolution.source} ({resolution.confidence})."
                 )
-            elif apollo_client.is_configured():
+            elif not tavily_is_configured():
                 raise PeopleDiscoveryError(
                     f"No company domain for {company.name}. "
-                    "Set domain on the Saved jobs page or re-ingest with a clearer posting."
+                    "Set company domain in **Job library**, enable Tavily, or re-ingest."
                 )
+            extra_warnings.append(
+                f"No company domain for {company.name} — using Tavily/CareerShift search."
+            )
 
         raw: list[dict[str, Any]] = []
+
+        parts = ["Tavily"]
+        settings = get_settings()
+        if include_careershift:
+            parts.append("CareerShift")
+        if settings.apollo_enabled and apollo_client.is_configured():
+            parts.append("Apollo")
+        _log(f"Starting people discovery ({' → '.join(parts)})")
+        tavily_people, tavily_warnings = discover_people_via_tavily(
+            company_name=company.name,
+            job=job,
+            search_context=search_context,
+            location_target=location_target,
+            on_progress=(lambda m: _log(m)) if on_progress else None,
+        )
+        raw.extend(tavily_people)
+        extra_warnings.extend(tavily_warnings)
+        _log(f"Tavily finished — {len(tavily_people)} profile(s)")
+
         if apollo_client.is_configured():
             if not domain:
                 extra_warnings.append("Apollo skipped — no company domain.")
+                _log("Apollo skipped — no company domain")
             else:
                 try:
+                    _log(f"Apollo: enriching organization for {domain}")
                     org = apollo_client.enrich_organization(domain=domain)
                     if org.get("id") and not company.apollo_organization_id:
                         company.apollo_organization_id = str(org["id"])
                         session.commit()
-                    raw = _collect_people(domain, location_target, search_context=search_context)
+                    _log("Apollo: searching people at company")
+                    raw.extend(_collect_people(domain, location_target, search_context=search_context))
+                    _log("Apollo: searching CMU alumni")
                     raw.extend(_search_cmu_alumni(domain, location_target))
+                    _log("Apollo search complete")
                 except apollo_client.ApolloError:
                     extra_warnings.append(f"Apollo enrich/search failed for {domain}")
+                    _log(f"Apollo failed for {domain}")
         else:
-            extra_warnings.append("Apollo not configured — using CareerShift only.")
+            extra_warnings.append("Apollo not configured — using Tavily only.")
+            _log("Apollo not configured — Tavily only")
 
-        cs_people, cs_warnings = _collect_people_careershift(
-            company.name,
-            location_target,
-            search_context=search_context,
-            company_domain=domain or None,
-        )
-        raw.extend(cs_people)
-        extra_warnings.extend(cs_warnings)
+        if include_careershift:
+            _log("CareerShift: browser search (slow — opt-in only)")
+            cs_people, cs_warnings = _collect_people_careershift(
+                normalize_company_search_name(company.name),
+                location_target,
+                search_context=search_context,
+                company_domain=domain or None,
+            )
+            raw.extend(cs_people)
+            extra_warnings.extend(cs_warnings)
+            _log(f"CareerShift finished — {len(cs_people)} profile(s)")
+        else:
+            _log("CareerShift skipped (CAREERSHIFT_PEOPLE_PIPELINE=false)")
 
         if not raw:
             raise PeopleDiscoveryError(
-                "No people sources available. Set APOLLO_API_KEY and/or log in to CareerShift."
+                "No people sources returned results. Set TAVILY_API_KEY and/or APOLLO_API_KEY."
             )
 
         ranked = _rank_contacts(
@@ -155,6 +212,7 @@ def rank_people_candidates(
         )
         ranked = [c for c in ranked if c.relevance_score >= _EXCLUDE_RELEVANCE_BELOW]
         ranked.sort(key=lambda c: c.relevance_score, reverse=True)
+        _log(f"Ranked {len(ranked)} candidate(s) above relevance threshold")
         return ranked, domain, company.name, extra_warnings
 
 
@@ -164,27 +222,61 @@ def validate_and_finalize_contacts(
     search_context: JobSearchContext,
     location_target: JobLocationTarget,
     company_domain: str,
+    job: Job | None = None,
+    company_name: str | None = None,
+    apollo_enrich_limit: int = 0,
+    guess_emails: bool = True,
+    on_progress: ProgressCallback | None = None,
 ) -> tuple[list[DiscoveredContact], dict[str, Any], list[str]]:
-    """Validate filters; enrich before validation so Apollo locations are available."""
+    """Validate filters, then batched AI email guess on passed contacts."""
     warnings: list[str] = []
 
+    def _log(msg: str) -> None:
+        from openrole.api.pipeline_cancel import check_cancelled
+
+        check_cancelled()
+        if on_progress:
+            on_progress(stamp(msg))
+
     # Enrich top pool first — search results often omit city until match_person.
-    pool = sorted(candidates, key=lambda c: c.relevance_score, reverse=True)[:30]
-    if company_domain and pool:
-        _enrich_contacts(pool, company_domain=company_domain, limit=_ENRICH_LIMIT)
+    pool = sorted(candidates, key=lambda c: c.relevance_score, reverse=True)[:50]
+    if company_domain and pool and apollo_enrich_limit > 0:
+        _log(f"Apollo enrich for up to {apollo_enrich_limit} contact(s)…")
+        _enrich_contacts(pool, company_domain=company_domain, limit=apollo_enrich_limit)
         _refresh_contact_reasons(
             pool,
             search_context=search_context,
             location_target=location_target,
             company_domain=company_domain,
         )
+        _log("Apollo enrich complete")
+    elif pool:
+        _log("Skipping Apollo email enrich (deferred — use LinkedIn or manual fetch)")
 
+    if job and company_name and get_settings().llm_configured:
+        _log(f"LLM relevance scoring for {len(pool)} contact(s) (one batched call)…")
+        pool, llm_warnings = score_contacts_with_llm(
+            pool,
+            job=job,
+            search_context=search_context,
+            company_name=company_name,
+            linkedin_hints=None,
+        )
+        warnings.extend(llm_warnings)
+        pool.sort(key=lambda c: c.relevance_score, reverse=True)
+        _log(f"LLM scoring done — {len(pool)} contact(s) kept")
+    elif pool:
+        _log("LLM scoring skipped (not configured)")
+
+    _log("Applying location + department filters…")
     validation = validate_contacts(
         pool,
         search_context=search_context,
         location_target=location_target,
+        job_title=job.title,
     )
-    final = validation["contacts"]
+    final = list(validation["contacts"])
+    location_rejected = list(validation.get("location_rejected") or [])
 
     if validation.get("retry_suggestion") == "relax_city_filter" and location_target.strict_cities:
         relaxed = JobLocationTarget(
@@ -195,24 +287,92 @@ def validate_and_finalize_contacts(
             state_tokens=location_target.state_tokens,
             strict_cities=False,
         )
-        validation = validate_contacts(
+        relaxed_validation = validate_contacts(
             pool,
             search_context=search_context,
             location_target=relaxed,
+            job_title=job.title,
         )
-        final = validation["contacts"]
-        warnings.append("Relaxed city filter — kept US matches when strict city match was empty.")
+        if relaxed_validation["contacts"]:
+            validation = relaxed_validation
+            final = list(relaxed_validation["contacts"])
+            warnings.append("Relaxed city filter — kept US matches when strict city match was empty.")
+        else:
+            validation = relaxed_validation
+
+    before_backfill = len(final)
+    final = backfill_location_contacts(
+        final,
+        location_rejected,
+        min_target=5,
+        max_total=_MAX_CONTACTS,
+    )
+    if len(final) > before_backfill:
+        added = len(final) - before_backfill
+        warnings.append(f"Location backfill: added {added} contact(s) to reach minimum of 5.")
+        _log(f"Location backfill: +{added} contact(s) (fewer than 5 passed strict filters)")
 
     if not validation["ok"]:
         warnings.append(
             f"Only {validation['validated_count']} contacts passed location/department filters."
         )
+    rejected_n = validation.get("rejected_count") or 0
+    if rejected_n:
+        sample = validation.get("rejected_sample") or []
+        _log(f"Filtered out {rejected_n} contact(s)" + (f" — e.g. {sample[0][:90]}" if sample else ""))
 
-    final = final[:_MAX_CONTACTS]
+    if guess_emails and company_domain and company_name and final:
+        missing = sum(1 for c in final if not c.email)
+        _log(f"AI email guessing for {missing} filtered contact(s) (one batched call)…")
+        final, guess_warnings = guess_emails_with_llm(
+            final,
+            company_name=company_name,
+            company_domain=company_domain,
+        )
+        if guess_warnings:
+            _refresh_contact_reasons(
+                final,
+                search_context=search_context,
+                location_target=location_target,
+                company_domain=company_domain,
+            )
+        warnings.extend(guess_warnings)
+        guessed = sum(1 for c in final if c.metadata_json.get("email_ai_generated"))
+        _log(f"Email guessing complete — {guessed} AI email(s)")
+    elif final:
+        _log("Skipping email guess (no domain or no passed contacts)")
+
+    if company_domain and job and company_name:
+        existing_names = {(c.full_name or "").lower() for c in final if c.full_name}
+        extra = _supplement_apollo_for_quotas(
+            final,
+            domain=company_domain,
+            location_target=location_target,
+            search_context=search_context,
+            job=job,
+            company_name=company_name,
+            existing_names=existing_names,
+            on_progress=on_progress,
+        )
+        if extra:
+            final.extend(extra)
+            warnings.append(f"Apollo quota supplement: added {len(extra)} contact(s).")
+            _log(f"Quota supplement: +{len(extra)} contact(s)")
+
     final.sort(key=_sort_key, reverse=True)
+    final = select_contacts_by_quota(final)
     for idx, contact in enumerate(final, start=1):
         contact.priority_rank = idx
 
+    if final:
+        _refresh_contact_reasons(
+            final,
+            search_context=search_context,
+            location_target=location_target,
+            company_domain=company_domain or None,
+        )
+
+    _log(f"Validation complete — {len(final)} contact(s) ready to save")
     return final, validation, warnings
 
 
@@ -223,7 +383,7 @@ def _refresh_contact_reasons(
     location_target: JobLocationTarget,
     company_domain: str | None = None,
 ) -> None:
-    dept_keywords = search_context.apollo_department_queries()
+    dept_keywords = search_context.expanded_department_queries()
     for contact in contacts:
         tier_name = contact.tier.name if hasattr(contact.tier, "name") else str(contact.tier)
         tier_label = tier_name.replace("_", " ").title()
@@ -236,14 +396,21 @@ def _refresh_contact_reasons(
         parts = [tier_label]
         if loc_reason and loc_reason != "Location unknown":
             parts.append(loc_reason)
-        if person_matches_department(contact.title, dept_keywords):
-            parts.append(f"Department match ({search_context.department_name or dept_keywords[0]})")
+        if person_matches_department(contact.title, dept_keywords) and (
+            search_context.department_name or dept_keywords
+        ):
+            parts.append(_department_match_label(search_context, dept_keywords))
         if contact.email:
             _, email_reason = email_actionable(
                 email=contact.email,
                 company_domain=company_domain,
             )
-            parts.append(email_reason)
+            if (contact.metadata_json or {}).get("email_ai_generated"):
+                conf = contact.metadata_json.get("email_guess_confidence")
+                suffix = f" ({conf}%)" if conf else ""
+                parts.append(f"AI-guessed email{suffix}")
+            else:
+                parts.append(email_reason)
         elif (contact.metadata_json or {}).get("stored_email_raw"):
             parts.append("No company email")
         elif (contact.metadata_json or {}).get("needs_email"):
@@ -255,30 +422,31 @@ def _refresh_contact_reasons(
 def discover_people_for_job(
     job_id: str,
     *,
-    enrich_top_n: int = _ENRICH_LIMIT,
+    enrich_top_n: int = 0,
 ) -> dict[str, Any]:
     """Full pipeline: context → search → validate → persist (UI entry point)."""
-    if not apollo_client.is_configured() and not careershift_client.is_ready():
+    if not apollo_client.is_configured() and not tavily_is_configured():
         raise PeopleDiscoveryError(
-            "People discovery needs APOLLO_API_KEY and/or CareerShift login "
-            "(python scripts/careershift_login.py)."
+            "People discovery needs TAVILY_API_KEY and/or APOLLO_API_KEY."
         )
 
     ctx, loc, ctx_warnings = extract_context_for_job(job_id)
     candidates, domain, company_name, source_warnings = rank_people_candidates(
-        job_id, search_context=ctx, location_target=loc
+        job_id, search_context=ctx, location_target=loc, include_careershift=False
     )
-    final, validation, val_warnings = validate_and_finalize_contacts(
-        candidates,
-        search_context=ctx,
-        location_target=loc,
-        company_domain=domain,
-    )
-    _ = enrich_top_n  # enrich handled in validate_and_finalize_contacts
-
     with session_scope() as session:
         job = _load_job(session, job_id)
         company = _load_company(session, job)
+        final, validation, val_warnings = validate_and_finalize_contacts(
+            candidates,
+            search_context=ctx,
+            location_target=loc,
+            company_domain=domain,
+            job=job,
+            company_name=company_name,
+            apollo_enrich_limit=enrich_top_n,
+            guess_emails=True,
+        )
         saved = save_discovered_contacts(
             session,
             company_id=company.id,
@@ -304,20 +472,6 @@ def discover_people_for_job(
         },
         "warnings": all_warnings,
     }
-
-
-def list_contacts_for_job(job_id: str) -> list[Contact]:
-    with session_scope() as session:
-        job = session.scalar(select(Job).where(Job.id == job_id).limit(1))
-        if job is None or not job.company_id:
-            return []
-        return list(
-            session.scalars(
-                select(Contact)
-                .where(Contact.company_id == job.company_id)
-                .order_by(Contact.priority_rank.asc(), Contact.full_name.asc())
-            )
-        )
 
 
 def _load_job(session, job_id: str) -> Job:
@@ -363,9 +517,44 @@ def _collect_people(
     seen: set[str] = set()
     merged: list[dict[str, Any]] = []
     apollo_locs = list(location_target.apollo_person_locations) or None
-    dept_queries = search_context.apollo_department_queries()
+    dept_queries = search_context.expanded_department_queries()
 
+    engineer_titles = [
+        "research engineer",
+        "software engineer",
+        "machine learning engineer",
+        "member of technical staff",
+        "applied scientist",
+    ]
+
+    # 1) Department-targeted engineers (highest priority)
+    for dq in dept_queries[:3]:
+        _merge_batch(
+            merged,
+            seen,
+            apollo_client.search_people(
+                domain=domain,
+                person_titles=[dq, *engineer_titles[:3]],
+                q_keywords=dq,
+                person_locations=apollo_locs,
+                per_page=15,
+            ),
+        )
+        _merge_batch(
+            merged,
+            seen,
+            apollo_client.search_people(
+                domain=domain,
+                q_keywords=dq,
+                person_locations=apollo_locs,
+                per_page=12,
+            ),
+        )
+
+    # 2) General engineers with department hints in titles
     for _label, titles in _SEARCH_PASSES:
+        if _label == "managers":
+            continue
         search_titles = list(titles)
         for dq in dept_queries[:2]:
             if dq.lower() not in " ".join(search_titles).lower():
@@ -377,19 +566,7 @@ def _collect_people(
                 domain=domain,
                 person_titles=search_titles,
                 person_locations=apollo_locs,
-                per_page=12,
-            ),
-        )
-
-    for dq in dept_queries[:3]:
-        _merge_batch(
-            merged,
-            seen,
-            apollo_client.search_people(
-                domain=domain,
-                q_keywords=dq,
-                person_locations=apollo_locs,
-                per_page=10,
+                per_page=10 if _label == "engineers" else 8,
             ),
         )
 
@@ -402,6 +579,22 @@ def _collect_people(
                 q_keywords=search_context.role_family,
                 person_locations=apollo_locs,
                 per_page=10,
+            ),
+        )
+
+    # 3) Hiring managers last — small cap so unrelated execs do not dominate
+    for dq in dept_queries[:2] or [""]:
+        titles = ["engineering manager", "hiring manager", "director"]
+        if dq:
+            titles = [dq, f"{dq} manager", *titles]
+        _merge_batch(
+            merged,
+            seen,
+            apollo_client.search_people(
+                domain=domain,
+                person_titles=titles,
+                person_locations=apollo_locs,
+                per_page=6,
             ),
         )
 
@@ -420,24 +613,30 @@ def _collect_people_careershift(
     if not careershift_client.is_ready():
         return [], warnings
 
-    settings = get_settings()
-    # Company-only search; city/title filtering happens in OpenRole validation.
-    queries: list[dict[str, Any]] = [
-        {
-            "company_name": company_name,
-            "max_results": 40,
-        }
-    ]
+    location = _careershift_location_string(location_target)
+    queries: list[dict[str, Any]] = []
 
-    if settings.cmu_school_name:
+    for title_kw in search_context.careershift_title_queries()[:2]:
         queries.append(
             {
                 "company_name": company_name,
-                "school_name": settings.cmu_school_name,
-                "max_results": 15,
+                "location": location,
+                "position_keywords": [title_kw],
+                "max_results": 12,
+                "skip_detail": True,
             }
         )
 
+    queries.append(
+        {
+            "company_name": company_name,
+            "location": location,
+            "max_results": 15,
+            "skip_detail": True,
+        }
+    )
+
+    merged: list[dict[str, Any]] = []
     try:
         merged = careershift_client.search_contacts_batch(queries)
     except careershift_client.CareerShiftNotConfiguredError:
@@ -481,6 +680,14 @@ def _collect_people_careershift(
     return validated_people, warnings
 
 
+def _department_match_label(search_context: JobSearchContext, dept_keywords: list[str]) -> str:
+    if search_context.department_name:
+        return f"Department match ({search_context.department_name})"
+    if dept_keywords:
+        return f"Department match ({dept_keywords[0]})"
+    return "Department match"
+
+
 def _careershift_location_string(location_target: JobLocationTarget) -> str | None:
     if location_target.city_tokens and location_target.state_tokens:
         city = location_target.city_tokens[0].replace("-", " ").title()
@@ -492,6 +699,19 @@ def _careershift_location_string(location_target: JobLocationTarget) -> str | No
 
 
 def _person_fields(raw: dict[str, Any]) -> dict[str, Any]:
+    if raw.get("_openrole_tavily"):
+        return {
+            "full_name": raw.get("name") or raw.get("full_name") or "Unknown",
+            "title": raw.get("title"),
+            "email": raw.get("email"),
+            "linkedin_url": raw.get("linkedin_url"),
+            "location": raw.get("location"),
+            "apollo_person_id": None,
+            "careershift_id": None,
+            "has_email": bool(raw.get("email")),
+            "organization_name": raw.get("company"),
+            "raw": raw,
+        }
     if raw.get("_openrole_careershift"):
         return careershift_client.person_to_fields(raw)
     return apollo_client.person_to_fields(raw)
@@ -524,6 +744,116 @@ def _search_cmu_alumni(domain: str, location_target: JobLocationTarget) -> list[
     return people
 
 
+def _supplement_apollo_for_quotas(
+    current: list[DiscoveredContact],
+    *,
+    domain: str,
+    location_target: JobLocationTarget,
+    search_context: JobSearchContext,
+    job: Job,
+    company_name: str,
+    existing_names: set[str],
+    on_progress: ProgressCallback | None = None,
+) -> list[DiscoveredContact]:
+    """Extra Apollo searches when tier quotas or minimum contact count are not met."""
+    from openrole.agents.contact_quota import CMU_ALUMNI_TARGET, TIER_QUOTAS, normalize_contact_tiers
+
+    if not apollo_client.is_configured():
+        return []
+
+    counts = tier_quota_counts(current)
+    need_eng = max(0, TIER_QUOTAS[ContactTier.TEAM_ENGINEER] - counts.get("TEAM_ENGINEER", 0))
+    need_mgr = max(0, TIER_QUOTAS[ContactTier.HIRING_MANAGER] - counts.get("HIRING_MANAGER", 0))
+    need_alumni = max(0, CMU_ALUMNI_TARGET - counts.get("CMU_ALUMNI", 0))
+    need_total = max(0, MIN_CONTACTS - len(current))
+
+    if need_eng == 0 and need_mgr == 0 and need_alumni == 0 and need_total == 0:
+        return []
+
+    def _log(msg: str) -> None:
+        from openrole.api.pipeline_cancel import check_cancelled
+
+        check_cancelled()
+        if on_progress:
+            on_progress(stamp(msg))
+
+    raw: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    apollo_locs = list(location_target.apollo_person_locations) or None
+
+    if need_eng > 0 or need_total > 0:
+        _log(f"Apollo supplement: engineers (need {max(need_eng, 1)})…")
+        _merge_batch(
+            raw,
+            seen,
+            apollo_client.search_people(
+                domain=domain,
+                person_titles=[
+                    "machine learning engineer",
+                    "software engineer",
+                    "research engineer",
+                    "staff engineer",
+                    "data scientist",
+                ],
+                person_locations=apollo_locs,
+                per_page=max(20, need_eng * 4),
+            ),
+        )
+
+    if need_mgr > 0:
+        _log(f"Apollo supplement: managers (need {need_mgr})…")
+        _merge_batch(
+            raw,
+            seen,
+            apollo_client.search_people(
+                domain=domain,
+                person_titles=[
+                    "engineering manager",
+                    "director of engineering",
+                    "head of engineering",
+                    "manager",
+                ],
+                person_locations=apollo_locs,
+                per_page=max(15, need_mgr * 4),
+            ),
+        )
+
+    if need_alumni > 0:
+        _log(f"Apollo supplement: CMU alumni (need {need_alumni})…")
+        raw.extend(_search_cmu_alumni(domain, location_target))
+
+    if not raw:
+        return []
+
+    ranked = _rank_contacts(
+        raw,
+        job=job,
+        company_name=company_name,
+        company_domain=domain,
+        location_target=location_target,
+        search_context=search_context,
+    )
+    ranked = [c for c in ranked if c.relevance_score >= _EXCLUDE_RELEVANCE_BELOW]
+    ranked = normalize_contact_tiers(ranked)
+
+    validation = validate_contacts(
+        ranked,
+        search_context=search_context,
+        location_target=location_target,
+        job_title=job.title,
+    )
+    added: list[DiscoveredContact] = []
+    for contact in validation["contacts"]:
+        key = (contact.full_name or "").lower()
+        if not key or key in existing_names:
+            continue
+        added.append(contact)
+        existing_names.add(key)
+        if len(current) + len(added) >= _MAX_CONTACTS:
+            break
+    return added
+
+
 def _rank_contacts(
     raw_people: list[dict[str, Any]],
     *,
@@ -535,7 +865,7 @@ def _rank_contacts(
 ) -> list[DiscoveredContact]:
     settings = get_settings()
     job_title = (job.title or "").lower()
-    dept_keywords = search_context.apollo_department_queries()
+    dept_keywords = search_context.expanded_department_queries()
     department = (search_context.department_name or job.department or "").lower()
 
     contacts: list[DiscoveredContact] = []
@@ -545,6 +875,7 @@ def _rank_contacts(
 
     for raw in raw_people:
         fields = _person_fields(raw)
+        fields["email"] = clean_email(fields.get("email"))
         pid = raw.get("id") or fields.get("apollo_person_id")
         if pid and pid in seen_ids:
             continue
@@ -561,6 +892,7 @@ def _rank_contacts(
             company_name=company_name,
             cmu_domain=settings.cmu_email_domain,
         )
+        is_alum = _is_cmu_alumni(raw, cmu_domain=settings.cmu_email_domain)
         loc_penalty, loc_reason = score_person_location(
             location=fields.get("location"),
             title=title,
@@ -588,28 +920,49 @@ def _rank_contacts(
         if fields.get("linkedin_url"):
             relevance += 15
         if raw.get("has_email") and not fields.get("email"):
-            relevance += 10
+            pass  # placeholder emails should not boost score
 
         reasons = [tier_reason, loc_reason]
-        if dept_match:
-            reasons.append(f"Department match ({search_context.department_name or dept_keywords[0]})")
+        if dept_match and (search_context.department_name or dept_keywords):
+            reasons.append(_department_match_label(search_context, dept_keywords))
         if email_reason:
             reasons.append(email_reason)
 
         is_careershift = bool(raw.get("_openrole_careershift"))
+        is_tavily = bool(raw.get("_openrole_tavily"))
+        pid_str = str(raw.get("id") or "")
+        is_apollo = bool(
+            raw.get("apollo_person_id")
+            or (not is_careershift and not is_tavily and pid_str and not pid_str.startswith(("cs:", "tv:")))
+        )
+        if is_tavily:
+            relevance += 30
+            if fields.get("linkedin_url"):
+                relevance += 25
+            if dept_match:
+                relevance += 100
+        if is_apollo and not fields.get("linkedin_url"):
+            relevance -= 40
+        if is_apollo and not dept_match and is_leadership_tier(tier):
+            relevance -= 50
         meta = {
-            "apollo_search": not is_careershift,
+            "tavily_search": is_tavily,
+            "apollo_search": is_apollo and not is_careershift,
             "careershift_search": is_careershift,
             "careershift_contact_id": fields.get("careershift_id"),
             "has_email_flag": raw.get("has_email"),
             "email_actionable": email_ok,
             "location_reason": loc_reason,
             "department_match": dept_match,
+            "is_cmu_alumni": is_alum,
             "company_domain": company_domain or None,
             "stored_email_raw": fields.get("email") if not email_ok else None,
-            "needs_email": is_careershift and not fields.get("email"),
+            "needs_email": (is_careershift or is_tavily) and not fields.get("email"),
         }
-        if not is_careershift and fields.get("apollo_person_id"):
+        if is_tavily:
+            meta["tavily_query_type"] = raw.get("tavily_query_type")
+            meta["tavily_query"] = raw.get("tavily_query")
+        if is_apollo and fields.get("apollo_person_id"):
             meta["apollo_person_id"] = fields.get("apollo_person_id")
         meta["discovery_source"] = compute_discovery_source(meta)
 
@@ -641,12 +994,12 @@ def _rank_contacts(
                 email=fields["email"] if email_ok else None,
                 linkedin_url=fields.get("linkedin_url"),
                 location=fields.get("location"),
-                apollo_person_id=fields.get("apollo_person_id") if not is_careershift else None,
+                apollo_person_id=fields.get("apollo_person_id") if is_apollo else None,
                 tier=tier,
                 priority_rank=0,
                 priority_reason=" · ".join(r for r in reasons if r),
                 relevance_score=relevance,
-                is_cmu_alumni=tier == ContactTier.CMU_ALUMNI,
+                is_cmu_alumni=is_alum,
                 metadata_json=meta,
             )
         )
@@ -671,12 +1024,20 @@ def _merge_duplicate_contact(
     is_careershift: bool,
     relevance: int,
 ) -> None:
+    is_tavily = bool(raw.get("_openrole_tavily"))
+    existing.metadata_json["tavily_search"] = (
+        existing.metadata_json.get("tavily_search") or is_tavily
+    )
     existing.metadata_json["apollo_search"] = (
-        existing.metadata_json.get("apollo_search") or not is_careershift
+        existing.metadata_json.get("apollo_search")
+        or bool(fields.get("apollo_person_id"))
+        or (not is_careershift and not is_tavily)
     )
     existing.metadata_json["careershift_search"] = (
         existing.metadata_json.get("careershift_search") or is_careershift
     )
+    if is_tavily:
+        existing.metadata_json.setdefault("tavily_query_type", raw.get("tavily_query_type"))
     if is_careershift and fields.get("careershift_id"):
         existing.metadata_json["careershift_contact_id"] = fields.get("careershift_id")
     if not is_careershift and fields.get("apollo_person_id"):
@@ -708,14 +1069,15 @@ def _classify_tier(
     if _INDIA_TITLE_RE.search(title_l) and "united states" not in title_l:
         return ContactTier.OTHER, "Role based outside US (India in title)"
 
-    if _is_cmu_alumni(person, cmu_domain=cmu_domain):
-        return ContactTier.CMU_ALUMNI, "CMU alumni at company"
-
     if _is_hiring_manager_title(title_l):
         if any(x in title_l for x in ("marketing", "sales application", "talent acquisition ( india)")):
             if _RECRUITER_RE.search(title_l):
                 return ContactTier.GENERAL_RECRUITER, "Company recruiter"
             return ContactTier.OTHER, "Director outside hiring team"
+        if _is_executive_title(title_l):
+            if person_matches_department(title, dept_keywords):
+                return ContactTier.EXECUTIVE, f"Senior leader in {department or 'target team'}"
+            return ContactTier.EXECUTIVE, "Senior leader / head of function"
         if person_matches_department(title, dept_keywords):
             return ContactTier.HIRING_MANAGER, f"Hiring manager in {department or 'target team'}"
         return ContactTier.HIRING_MANAGER, "Engineering manager / director"
@@ -740,6 +1102,20 @@ def _is_hiring_manager_title(title_l: str) -> bool:
     ):
         return False
     return bool(_MANAGER_RE.search(title_l))
+
+
+def _is_executive_title(title_l: str) -> bool:
+    if re.search(
+        r"\b(head of|vp|vice president|svp|evp|chief\s+\w+\s+officer|ciso|cto|ceo|cfo)\b",
+        title_l,
+    ):
+        return True
+    if re.search(r"\bdistinguished\b", title_l) and not (
+        _ENGINEER_RE.search(title_l)
+        and not re.search(r"\b(head of|director|vp)\b", title_l)
+    ):
+        return True
+    return False
 
 
 def _department_bonus(
@@ -778,6 +1154,12 @@ def _is_cmu_alumni(person: dict[str, Any], *, cmu_domain: str) -> bool:
         return True
     school = str(person.get("school") or "").lower()
     if school and any(kw in school for kw in _CMU_SCHOOL_KEYWORDS):
+        return True
+    text_blob = " ".join(
+        str(person.get(key) or "")
+        for key in ("title", "headline", "bio", "snippet", "content", "organization_name")
+    ).lower()
+    if any(kw in text_blob for kw in _CMU_SCHOOL_KEYWORDS):
         return True
     return False
 
@@ -841,7 +1223,9 @@ def _discovery_warnings(
         )
     with_email = sum(1 for c in contacts if c.email)
     if contacts and with_email == 0:
-        warnings.append("No company emails — use LinkedIn or re-run after Apollo credits refresh.")
+        warnings.append(
+            "No verified emails yet — use LinkedIn outreach or fetch email from CareerShift per contact."
+        )
     return warnings
 
 

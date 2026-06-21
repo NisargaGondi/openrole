@@ -1,0 +1,11 @@
+"""Signal theme design tokens."""
+
+SIGNAL_BG = "#f5f3ff"
+SIGNAL_INDOGO = "#6366f1"
+SIGNAL_INDOGO_DARK = "#4338ca"
+SIGNAL_CORAL = "#f97316"
+SIGNAL_CORAL_LIGHT = "#fb923c"
+SIGNAL_GLASS = "rgba(255,255,255,0.72)"
+SIGNAL_LOG_BG = "#1e1b4b"
+SIGNAL_TEXT = "#1e1b4b"
+SIGNAL_MUTED = "#64748b"

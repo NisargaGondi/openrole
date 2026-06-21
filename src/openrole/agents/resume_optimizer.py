@@ -158,13 +158,48 @@ def _analyze_with_llm(
         resume_label=resume_label,
         match_score=int(data.get("match_score") or 0),
         summary=str(data.get("summary") or ""),
-        strengths=list(data.get("strengths") or []),
-        gaps=list(data.get("gaps") or []),
-        missing_keywords=list(data.get("missing_keywords") or []),
-        ats_risks=list(data.get("ats_risks") or []),
+        strengths=_coerce_string_list(data.get("strengths")),
+        gaps=_coerce_string_list(data.get("gaps")),
+        missing_keywords=_coerce_string_list(data.get("missing_keywords")),
+        ats_risks=_coerce_string_list(
+            data.get("ats_risks"),
+            keys=("risk", "issue", "description", "text", "title"),
+        ),
         suggested_edits=edits,
         recommended_resume=data.get("recommended_resume"),
     )
+
+
+def _coerce_string_list(
+    items: Any,
+    *,
+    keys: tuple[str, ...] = ("text", "item", "gap", "strength", "keyword", "issue", "description"),
+) -> list[str]:
+    """Normalize LLM arrays that may be strings or {risk: ...} objects."""
+    if not items:
+        return []
+    if not isinstance(items, list):
+        return [str(items).strip()] if str(items).strip() else []
+
+    out: list[str] = []
+    for item in items:
+        if isinstance(item, str):
+            text = item.strip()
+        elif isinstance(item, dict):
+            text = ""
+            for key in keys:
+                val = item.get(key)
+                if val:
+                    text = str(val).strip()
+                    break
+            if not text:
+                parts = [str(v).strip() for v in item.values() if v]
+                text = " — ".join(parts)
+        else:
+            text = str(item).strip() if item is not None else ""
+        if text:
+            out.append(text)
+    return out
 
 
 def _parse_json(content: str) -> dict[str, Any]:

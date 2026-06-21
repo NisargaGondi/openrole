@@ -9,6 +9,7 @@ import httpx
 from openrole.config import get_settings
 
 TAVILY_URL = "https://api.tavily.com/search"
+TAVILY_EXTRACT_URL = "https://api.tavily.com/extract"
 
 
 def is_configured() -> bool:
@@ -56,6 +57,46 @@ def search_web(
                 }
             )
     return results
+
+
+def extract_url(
+    url: str,
+    *,
+    extract_depth: str = "basic",
+    query: str | None = None,
+) -> dict[str, Any] | None:
+    """Extract readable page content from a URL via Tavily Extract API."""
+    key = get_settings().tavily_api_key
+    if not key:
+        return None
+
+    body: dict[str, Any] = {
+        "api_key": key,
+        "urls": url,
+        "extract_depth": extract_depth,
+    }
+    if query:
+        body["query"] = query
+
+    try:
+        with httpx.Client(timeout=60.0) as client:
+            response = client.post(TAVILY_EXTRACT_URL, json=body)
+            response.raise_for_status()
+            data = response.json()
+    except Exception:
+        return None
+
+    for row in data.get("results") or []:
+        if not isinstance(row, dict):
+            continue
+        raw = row.get("raw_content") or row.get("content")
+        if raw and str(raw).strip():
+            return {
+                "url": row.get("url") or url,
+                "raw_content": str(raw),
+                "source": "tavily",
+            }
+    return None
 
 
 def probe_tavily(*, query: str = "CrowdStrike company website") -> dict[str, Any]:

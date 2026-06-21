@@ -16,11 +16,13 @@ from openrole.graph.nodes.apply import (
 )
 from openrole.graph.nodes.finalize import finalize_node
 from openrole.graph.nodes.ingest import ingest_node
-from openrole.graph.nodes.outreach import (
-    aggregate_outreach_node,
-    draft_worker_node,
-    research_worker_node,
+from openrole.graph.nodes.batch_outreach import (
+    batch_drafts_node,
+    batch_research_node,
+    route_batch_drafts,
+    route_batch_research,
 )
+from openrole.graph.nodes.outreach import aggregate_outreach_node
 from openrole.graph.nodes.people import (
     discover_candidates_node,
     extract_context_node,
@@ -31,8 +33,6 @@ from openrole.graph.nodes.people import (
 from openrole.graph.nodes.review import application_review_node, outreach_review_node
 from openrole.graph.routing import (
     dispatch_app_answers,
-    dispatch_drafts,
-    dispatch_research,
     route_after_ingest,
     route_after_persist,
     route_entry,
@@ -77,10 +77,10 @@ def get_pipeline_graph():
 
     # Outreach orchestrator + Send workers
     graph.add_node("prepare_outreach", prepare_outreach_node)
-    graph.add_node("research_worker", research_worker_node)
+    graph.add_node("batch_research", batch_research_node)
     graph.add_node("skip_research", _skip_research_node)
     graph.add_node("aggregate_research", _aggregate_research_node)
-    graph.add_node("draft_worker", draft_worker_node)
+    graph.add_node("batch_drafts", batch_drafts_node)
     graph.add_node("skip_drafts", _skip_drafts_node)
     graph.add_node("aggregate_outreach", aggregate_outreach_node)
 
@@ -136,17 +136,17 @@ def get_pipeline_graph():
     # Research Send workers
     graph.add_conditional_edges(
         "prepare_outreach",
-        dispatch_research,
-        ["research_worker", "skip_research"],
+        route_batch_research,
+        {"batch_research": "batch_research", "skip_research": "skip_research"},
     )
-    graph.add_edge("research_worker", "aggregate_research")
+    graph.add_edge("batch_research", "aggregate_research")
     graph.add_edge("skip_research", "aggregate_research")
     graph.add_conditional_edges(
         "aggregate_research",
-        dispatch_drafts,
-        ["draft_worker", "skip_drafts"],
+        route_batch_drafts,
+        {"batch_drafts": "batch_drafts", "skip_drafts": "skip_drafts"},
     )
-    graph.add_edge("draft_worker", "aggregate_outreach")
+    graph.add_edge("batch_drafts", "aggregate_outreach")
     graph.add_edge("skip_drafts", "aggregate_outreach")
     graph.add_edge("aggregate_outreach", "outreach_review")
 

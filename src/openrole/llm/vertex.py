@@ -10,6 +10,8 @@ def get_chat_model(
     *,
     writing: bool = False,
     ingestion: bool = False,
+    research: bool = False,
+    fast: bool = False,
     temperature: float = 0.2,
 ) -> BaseChatModel:
     settings = get_settings()
@@ -17,9 +19,9 @@ def get_chat_model(
         raise RuntimeError(
             "GCP_PROJECT_ID is not set. Add it to .env or export it before using Gemini."
         )
-    if ingestion:
+    if fast or ingestion:
         model_name = settings.vertex_model_ingestion
-    elif writing:
+    elif research or writing:
         model_name = settings.vertex_model_writing
     else:
         model_name = settings.vertex_model_default

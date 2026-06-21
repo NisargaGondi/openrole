@@ -12,6 +12,7 @@ from openrole.db.repository import save_outreach_draft
 from openrole.db.session import session_scope
 from openrole.agents.outreach_prompts import (
     build_draft_system_prompt,
+    get_tier_template,
     resolve_contact_tier,
     tier_label,
 )
@@ -166,11 +167,13 @@ def _generate_drafts(
     revision_feedback: str | None = None,
 ) -> dict[str, dict[str, str | None]]:
     try:
-        model = get_chat_model(writing=True, temperature=0.4)
+        model = get_chat_model(writing=True, temperature=0.3)
     except RuntimeError as exc:
         raise EmailWriterError(str(exc)) from exc
 
     tier = resolve_contact_tier(contact)
+    template = get_tier_template(tier)
+    research_angles = list(brief.get("outreach_angles") or [])
     context = {
         "contact": {
             "name": contact.full_name,
@@ -178,6 +181,7 @@ def _generate_drafts(
             "email": contact.email,
             "tier": tier.name,
             "tier_label": tier_label(tier),
+            "template_label": template.get("label"),
             "priority_reason": contact.priority_reason,
         },
         "job": {
@@ -187,14 +191,21 @@ def _generate_drafts(
             "locations": job.locations,
             "description_excerpt": (job.description or "")[:3000],
         },
-        "research": brief,
+        "research": {
+            **brief,
+            "primary_hook": brief.get("suggested_hook") or (research_angles[0] if research_angles else ""),
+            "top_outreach_angles": research_angles[:3],
+            "public_signals": brief.get("public_signals") or [],
+        },
         "candidate_profile": {
             "name": profile.get("name"),
+            "school": profile.get("school"),
             "linkedin_url": profile.get("linkedin_url"),
             "github_url": profile.get("github_url"),
             "website_url": profile.get("website_url"),
             "graduation": profile.get("graduation"),
             "role_search": profile.get("role_search"),
+            "visa_status": profile.get("visa_status"),
             "resume_labels": [r.get("label") for r in profile.get("resumes") or []],
             "full_context": profile.get("prompt_context"),
         },

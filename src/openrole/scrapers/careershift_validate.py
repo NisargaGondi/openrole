@@ -5,7 +5,8 @@ from __future__ import annotations
 import re
 from typing import Any
 
-_EMAIL_RE = re.compile(r"^[a-z0-9._%+-]+@[a-z0-9.-]+\.[a-z]{2,}$", re.I)
+from openrole.scrapers.email_utils import clean_email as _clean_email
+
 _PHONE_RE = re.compile(r"^\+?[\d\s().-]{7,}$")
 
 
@@ -36,12 +37,12 @@ def validate_careershift_contact(
 
     flags: list[str] = []
     if email:
-        if not _EMAIL_RE.match(email):
-            return False, f"invalid email format ({email})", {}
         if company_domain and not _email_at_domain(email, company_domain):
             flags.append("email_not_at_company_domain")
         else:
             flags.append("email_validated")
+    elif contact.get("email"):
+        flags.append("email_placeholder")
     else:
         flags.append("email_missing")
 
@@ -73,15 +74,6 @@ def merge_validated_fields(contact: dict[str, Any], validated: dict[str, Any]) -
         elif value is not None:
             merged[key] = value
     return merged
-
-
-def _clean_email(raw: Any) -> str | None:
-    if not raw:
-        return None
-    email = str(raw).strip().lower()
-    if email in ("email@example.com", "n/a", "none", "-"):
-        return None
-    return email if _EMAIL_RE.match(email) else None
 
 
 def _company_matches(found: str, expected: str) -> bool:

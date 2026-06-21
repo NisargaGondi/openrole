@@ -3,9 +3,25 @@
 from __future__ import annotations
 
 from openrole.agents.app_assistant import ApplicationAssistantError, draft_application_answers
-from openrole.agents.resume_optimizer import ResumeOptimizerError, optimize_resume_for_job
+from openrole.agents.resume_optimizer import (
+    ResumeOptimizerError,
+    optimize_all_resumes_for_job,
+    optimize_resume_for_job,
+)
 from openrole.graph.state import AppAnswerWorkerState, OpenRoleState
 from openrole.schemas.pipeline import PipelineOptions
+
+
+def _resolve_resume_targets(opts: PipelineOptions) -> str | list[str | None]:
+    if opts.resume_labels:
+        if len(opts.resume_labels) == 1 and opts.resume_labels[0] == "__all__":
+            return "__all__"
+        return list(opts.resume_labels)
+    if opts.resume_label == "__all__":
+        return "__all__"
+    if opts.resume_label:
+        return [opts.resume_label]
+    return [None]
 
 
 def optimize_resume_node(state: OpenRoleState) -> dict:
@@ -13,14 +29,39 @@ def optimize_resume_node(state: OpenRoleState) -> dict:
     if not job_id:
         return {"errors": ["job_id required for resume optimization"]}
     opts = PipelineOptions.from_state(state.get("pipeline_options"))
+    targets = _resolve_resume_targets(opts)
+    warnings: list[str] = []
+    errors: list[str] = []
+
     try:
-        result = optimize_resume_for_job(job_id=job_id, resume_label=opts.resume_label)
-        report = result.get("report") or {}
+        if targets == "__all__":
+            result = optimize_all_resumes_for_job(job_id=job_id)
+            reports = result.get("reports") or []
+            warnings.extend(result.get("warnings") or [])
+        else:
+            reports = []
+            for label in targets:
+                try:
+                    out = optimize_resume_for_job(job_id=job_id, resume_label=label)
+                    reports.append(out.get("report") or {})
+                    warnings.extend(out.get("profile_warnings") or [])
+                except ResumeOptimizerError as exc:
+                    errors.append(str(exc))
+
+        if not reports:
+            return {
+                "errors": errors or ["No resume analysis completed"],
+                "pipeline_stage": "resume_failed",
+            }
+
+        best = max(reports, key=lambda r: int(r.get("match_score") or 0))
         return {
-            "resume_report": report,
+            "resume_report": best,
+            "resume_analyses": {r.get("resume_label") or "default": r for r in reports},
             "pipeline_stage": "resume_analyzed",
             "stages_completed": ["optimize_resume"],
-            "warnings": result.get("profile_warnings") or [],
+            "warnings": warnings,
+            **({"errors": errors} if errors else {}),
         }
     except ResumeOptimizerError as exc:
         return {"errors": [str(exc)], "pipeline_stage": "resume_failed"}

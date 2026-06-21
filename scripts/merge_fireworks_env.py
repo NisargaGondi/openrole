@@ -16,9 +16,17 @@ KEYS = (
     "FIREWORKS_MODEL",
     "FIREWORKS_MODEL_DEFAULT",
     "FIREWORKS_MODEL_INGESTION",
+    "FIREWORKS_MODEL_RESEARCH",
     "FIREWORKS_MODEL_WRITING",
     "FIREWORKS_MEMORY_MODEL",
 )
+
+_RECOMMENDED = {
+    "FIREWORKS_MODEL_INGESTION": "accounts/fireworks/models/glm-5p2",
+    "FIREWORKS_MODEL_RESEARCH": "accounts/fireworks/models/kimi-k2p6",
+    "FIREWORKS_MODEL_WRITING": "accounts/fireworks/models/deepseek-v4-pro",
+    "FIREWORKS_MODEL_DEFAULT": "accounts/fireworks/models/deepseek-v4-pro",
+}
 
 
 def _parse_env(path: Path) -> dict[str, str]:
@@ -59,6 +67,8 @@ def main() -> int:
     if sed.get("FIREWORKS_MODEL") and "FIREWORKS_MODEL_INGESTION" not in sed:
         sed.setdefault("FIREWORKS_MODEL_INGESTION", sed["FIREWORKS_MODEL"])
         sed.setdefault("FIREWORKS_MODEL_DEFAULT", sed["FIREWORKS_MODEL"])
+    for rec_key, rec_val in _RECOMMENDED.items():
+        sed.setdefault(rec_key, rec_val)
 
     for key in KEYS:
         if key in existing and existing[key]:

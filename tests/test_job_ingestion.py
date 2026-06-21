@@ -36,7 +36,16 @@ def test_heuristic_text_ingest(monkeypatch):
 
     monkeypatch.setattr(
         "openrole.agents.job_ingestion.get_settings",
-        lambda: type("S", (), {"llm_configured": False})(),
+        lambda: type(
+            "S",
+            (),
+            {
+                "llm_configured": False,
+                "scout_filter_experience": False,
+                "candidate_years_experience": 2.0,
+                "scout_experience_slack_years": 1.0,
+            },
+        )(),
     )
 
     init_db()
@@ -48,8 +57,9 @@ def test_heuristic_text_ingest(monkeypatch):
     assert result["parsed_job"]["company_name"] == "Acme AI"
 
 
+@patch("openrole.agents.job_ingestion.enrich_parsed_job_with_llm")
 @patch("openrole.scrapers.ats_apis._get_json")
-def test_greenhouse_ingest(mock_get_json, monkeypatch):
+def test_greenhouse_ingest(mock_get_json, _mock_enrich, monkeypatch):
     monkeypatch.setenv("DATABASE_URL", "sqlite:///:memory:")
     import openrole.db.session as db_session
     from openrole.config import get_settings
@@ -58,6 +68,11 @@ def test_greenhouse_ingest(mock_get_json, monkeypatch):
     db_session._SessionLocal = None
     get_settings.cache_clear()
     init_db()
+
+    def _passthrough(parsed, **kwargs):
+        return parsed, []
+
+    _mock_enrich.side_effect = _passthrough
 
     mock_get_json.return_value = {
         "id": 123456,

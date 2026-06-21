@@ -113,14 +113,31 @@ def score_person_location(
 
 def person_matches_department(title: str | None, keywords: list[str]) -> bool:
     if not keywords:
-        return True
+        return False
     title_l = (title or "").lower()
-    return any(kw.lower() in title_l for kw in keywords)
+    for kw in keywords:
+        token = kw.lower().strip()
+        if not token:
+            continue
+        if token in title_l:
+            return True
+        # safeguard ↔ safeguards
+        if token.rstrip("s") in title_l or f"{token}s" in title_l:
+            return True
+    return False
 
 
 def email_actionable(*, email: str | None, company_domain: str | None) -> tuple[bool, str]:
+    from openrole.scrapers.email_utils import clean_email, is_placeholder_email
+
     if not email:
         return False, "No email"
+    if is_placeholder_email(email):
+        return False, "Placeholder email"
+    cleaned = clean_email(email)
+    if not cleaned:
+        return False, "Invalid email"
+    email = cleaned
     domain = email.split("@")[-1].lower().strip()
     if any(marker in domain for marker in _ACADEMIC_EMAIL_MARKERS):
         return False, f"Non-company email ({domain})"

@@ -1,19 +1,22 @@
-"""OpenRole Streamlit dashboard entrypoint."""
+"""OpenRole — top navigation entry (Signal theme)."""
 
 import streamlit as st
 
-from openrole import __version__
-from openrole.config import get_settings
 from openrole.db.session import init_db
+from openrole.ui.navigation import (
+    PAGE_HOME,
+    PAGE_JOB_LIBRARY,
+    PAGE_SCOUT,
+    PAGE_SETTINGS,
+)
+from openrole.ui.theme import inject_theme
 
 st.set_page_config(
     page_title="OpenRole",
     page_icon="◉",
     layout="wide",
-    initial_sidebar_state="expanded",
+    initial_sidebar_state="collapsed",
 )
-
-settings = get_settings()
 
 
 @st.cache_resource
@@ -23,32 +26,12 @@ def _ensure_db() -> bool:
 
 
 _ensure_db()
+inject_theme()
 
-st.title("OpenRole")
-st.caption(f"v{__version__} — research first, send second")
+home = st.Page(PAGE_HOME, title="Home", icon="🏠", default=True)
+scout = st.Page(PAGE_SCOUT, title="Scout", icon="📡")
+library = st.Page(PAGE_JOB_LIBRARY, title="Library", icon="📚")
+settings = st.Page(PAGE_SETTINGS, title="Settings", icon="⚙️")
 
-col1, col2, col3 = st.columns(3)
-with col1:
-    st.metric("Environment", settings.app_env)
-with col2:
-    st.metric("Database", "SQLite" if settings.is_sqlite else "PostgreSQL")
-with col3:
-    if settings.llm_configured:
-        label = settings.llm_provider.upper()
-    else:
-        label = "not configured"
-    st.metric("LLM", label)
-
-st.divider()
-
-st.markdown(
-    """
-Use the sidebar:
-
-- **Jobs** — ingest URLs (Greenhouse, Lever, Ashby, LinkedIn, Indeed) and view saved roles
-- **Outreach** — review email and LinkedIn drafts
-- **Apply** — resume fit / ATS analysis and application question drafts
-- **Pipeline** — run the full LangGraph workflow with review gates
-- **Settings** — API keys, candidate profile, and integration status
-"""
-)
+pg = st.navigation([home, scout, library, settings], position="top")
+pg.run()
